@@ -178,8 +178,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_history.append({"role": "assistant", "content": bot_response})
         
         # Ограничиваем историю до последних 10 сообщений
-        if len(chat_history) > 10:
-            chat_history = chat_history[-10:]
+        if len(chat_history) > 1000000:
+            chat_history = chat_history[-1000000:]
             
         with open(history_file, 'w', encoding='utf-8') as file:
             json.dump(chat_history, file, ensure_ascii=False, indent=2)
