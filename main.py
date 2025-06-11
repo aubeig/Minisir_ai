@@ -6,7 +6,6 @@ import asyncio
 import time
 from telegram import Update
 from telegram.constants import ParseMode, ChatAction
-from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -16,8 +15,8 @@ from telegram.ext import (
 )
 
 # Константы конфигурации
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")  # Исправлено: получение из переменных окружения
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")  # Исправлено: получение из переменных окружения
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 API_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL = "deepseek/deepseek-r1:free"
 
@@ -116,6 +115,9 @@ async def send_api_request(payload, headers):
                     continue
                 else:
                     raise Exception("Превышено количество запросов к API. Попробуйте позже.")
+            elif e.response.status_code == 401:  # Unauthorized
+                logger.error("Ошибка 401: Неверная аутентификация")
+                raise Exception("Неверный API-ключ OpenRouter") from e
             else:
                 raise
                 
@@ -154,12 +156,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "HTTP-Referer": "https://your-bot-url.onrender.com",  # ДОБАВЛЕНО: обязательный заголовок
+        "X-Title": "Telegram AI Bot"  # ДОБАВЛЕНО: обязательный заголовок
     }
     payload = {
         "model": MODEL,
         "messages": chat_history,
-        "temperature": 1,
-        "max_tokens": 128000
+        "temperature": 0.7,  # ИСПРАВЛЕНО: уменьшено с 1 до 0.7
+        "max_tokens": 1024  # ИСПРАВЛЕНО: уменьшено с 128000 до 1024
     }
 
     try:
@@ -172,6 +176,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Сохранение истории
         chat_history.append({"role": "assistant", "content": bot_response})
+        
+        # Ограничиваем историю до последних 10 сообщений
+        if len(chat_history) > 10:
+            chat_history = chat_history[-10:]
+            
         with open(history_file, 'w', encoding='utf-8') as file:
             json.dump(chat_history, file, ensure_ascii=False, indent=2)
 
@@ -182,6 +191,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if e.response.status_code == 429:
             logger.error(f"Ошибка 429: Превышено количество запросов")
             await update.message.reply_text("⚠️ Превышено количество запросов к ИИ. Пожалуйста, подождите немного.")
+        elif e.response.status_code == 401:
+            logger.error(f"Ошибка 401: Неверная аутентификация")
+            await update.message.reply_text("⚠️ Ошибка аутентификации с API ИИ. Пожалуйста, сообщите администратору.")
         else:
             logger.error(f"HTTP ошибка: {e}")
             await update.message.reply_text("⚠️ Ошибка сервера ИИ. Попробуйте позже.")
@@ -192,7 +204,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     except Exception as e:
         logger.error(f"Ошибка: {e}", exc_info=True)
-        await update.message.reply_text("⚠️ Возникла непредвиденная ошибка. Попробуйте позже.")
+        await update.message.reply_text(f"⚠️ Возникла непредвиденная ошибка: {str(e)}")
 
 # Команда /start с обычным Markdown
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -209,9 +221,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Главная функция
 def main():
-    # === ВРЕМЕННАЯ ДИАГНОСТИКА (УДАЛИТЕ ПОСЛЕ ФИКСА) ===
-    logger.info(f"Telegram Token: {TELEGRAM_BOT_TOKEN[:10]}...")  # Первые 10 символов
-    logger.info(f"OpenRouter Key: {OPENROUTER_API_KEY[:10]}...")  # Первые 10 символов
+    # Диагностика
+    logger.info(f"Telegram Token: {TELEGRAM_BOT_TOKEN[:10]}...")
+    logger.info(f"OpenRouter Key: {OPENROUTER_API_KEY[:10]}...")
     
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
@@ -220,4 +232,4 @@ def main():
     app.run_polling()
 
 if __name__ == "__main__":
-    main()
+    main() import requests
