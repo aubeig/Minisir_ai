@@ -163,7 +163,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "model": MODEL,
         "messages": chat_history,
         "temperature": 0.7,  # ИСПРАВЛЕНО: уменьшено с 1 до 0.7
-        "max_tokens": 1024  # ИСПРАВЛЕНО: уменьшено с 128000 до 1024
+        "max_tokens": 4096  # ИСПРАВЛЕНО: уменьшено с 128000 до 1024
     }
 
     try:
@@ -210,8 +210,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
         "┏━━━━━━━✦❘༻༺❘✦━━━━━━━━┓\n"
+        ""
         "*Привет!* ✨\n"
         "Чем сегодня займёмся? Помощь, творчество или просто поболтаем? 😊\n"
+        ""
         "┗━━━━━━━✦❘༻༺❘✦━━━━━━━━┛"
     )
     await update.message.reply_text(
