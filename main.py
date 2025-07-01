@@ -2,7 +2,7 @@ import os
 import json
 import asyncio
 import requests
-import logging
+import logging2
 from telegram import (
     Update,
     ReplyKeyboardMarkup,
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 # Конфигурация
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-MODEL = "qwen/qwen3-235b-a22b:free"
+MODEL = "deepseek/deepseek-r1:free"
 ADMIN_PASSWORD = "illovyly"
 MAX_HISTORY_LENGTH = 16  # Уменьшено для соответствия ограничениям токенов
 
