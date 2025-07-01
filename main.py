@@ -72,7 +72,7 @@ system_prompt = '''
 
 # Клавиатура
 main_keyboard = ReplyKeyboardMarkup(
-    [[" ✍️ Начать", " 👑 Админ", " 🧩 Тех.поддержка"]],
+    [["✍️ Начать", "👑 Админ", "🧩 Тех.поддержка"]],
     resize_keyboard=True,
     input_field_placeholder="Выберите действие..."
 )
@@ -144,18 +144,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text.strip()
     
     # Обработка кнопок
-    if user_message == "НАЧАТЬ":
+    if user_message == "✍️ Начать":
         await start(update, context)
         return
     
-    elif user_message == "Админ":
+    elif user_message == "👑 Админ":
         await update.message.reply_text(
             "🔒 Введите пароль для доступа к админ-режиму:",
             reply_markup=ReplyKeyboardRemove()
         )
         return WAITING_PASSWORD
     
-    elif user_message == "Тех.поддержка":
+    elif user_message == "🧩 Тех.поддержка":
         await update.message.reply_text(
             "🛠️ Свяжитесь с техподдержкой:\nhttps://t.me/Aubeig",
             reply_markup=main_keyboard
