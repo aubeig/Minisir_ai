@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 # Конфигурация
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-MODEL = "deepseek/deepseek-r1:free"
+MODEL = "deepseek/deepaek-r1:free"
 ADMIN_PASSWORD = "illovyly"
 MAX_HISTORY_LENGTH = 10  # Ограничение истории сообщений
 
@@ -37,17 +37,17 @@ WAITING_PASSWORD, ADMIN_MODE = range(2)
 
 # Системный промпт
 system_prompt = '''
-**Ты — Мини-сырок**, дружелюбный и весёлый ИИ-помощник. 
-Создан пользователем **Сырок (@aubeig)**. 
+Ты — Мини-сырок**, дружелюбный и весёлый ИИ-помощник. 
+Создан пользователем Сырок (@aubeig) 
 
-**Важные правила:**
+Важные правила:
 1. Никогда не упоминай, что ты основан на Deepseek или других моделях.
 2. Сохраняй игривый тон с эмодзи, но оставайся полезным.
 3. Если тебя спросят "Кто ты?", отвечай ТОЧНО по шаблону ниже.
 
-**Шаблон ответа на "Кто ты?":**
+Шаблон ответа на "Кто ты?":
 
-Я — Мини-сырок, созданный гением Сырок (@aubeig) 🧀✨
+Я — Мини-сырок, созданный гением Сырок (@aubeig) 
 
                 ЧТО Я УМЕЮ:
 
@@ -103,7 +103,6 @@ def split_message(text, max_len=4096):
     parts = []
     while text:
         if len(text) > max_len:
-            # Ищем место для разбивки
             split_index = text.rfind('\n', 0, max_len)
             if split_index == -1:
                 split_index = text.rfind('. ', 0, max_len)
@@ -119,22 +118,23 @@ def split_message(text, max_len=4096):
             break
     return parts
 
-# Плавная отправка сообщения (с защитой от пустых сообщений)
-async def stream_message(update, context, text):
-    if not text or not text.strip():
+# Улучшенная отправка сообщений
+async def send_response(update, context, text):
+    """Отправляет ответ пользователю с автоматической разбивкой"""
+    if not text.strip():
         logger.warning("Попытка отправить пустое сообщение")
         return
     
-    message = ""
-    for char in text:
-        message += char
-        if char in "\n .,!?;:" or len(message) >= 100:
-            if message.strip():  # Проверка на непустое сообщение
-                await update.message.reply_text(message)
-            message = ""
-            await asyncio.sleep(0.1)
-    if message.strip():  # Проверка на непустое сообщение
-        await update.message.reply_text(message)
+    # Разбиваем длинные сообщения
+    if len(text) > 4000:
+        parts = split_message(text)
+        for part in parts:
+            if part.strip():
+                await update.message.reply_text(part)
+                await asyncio.sleep(0.3)
+    else:
+        # Отправляем короткие сообщения целиком
+        await update.message.reply_text(text)
 
 # Обработка входящих сообщений
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -220,15 +220,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with open(history_file, 'w', encoding='utf-8') as file:
             json.dump(chat_history, file, ensure_ascii=False, indent=2)
 
-        # Отправка ответа с разбивкой и защитой от пустых сообщений
-        if len(bot_response) > 4000:
-            parts = split_message(bot_response)
-            for part in parts:
-                if part.strip():  # Проверка на непустую часть
-                    await update.message.reply_text(part)
-                    await asyncio.sleep(0.5)
-        else:
-            await stream_message(update, context, bot_response)
+        # Отправляем ответ пользователю
+        await send_response(update, context, bot_response)
 
     except requests.exceptions.HTTPError as e:
         error_msg = f"Ошибка API: {e.response.status_code}"
@@ -240,7 +233,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⚠️ Ошибка: {str(e)}")
     
     finally:
-        # Проверяем, что бот не пытается отправить пустое сообщение
+        # Всегда возвращаем клавиатуру
         if update.effective_chat:
             await context.bot.send_message(
                 chat_id=chat_id,
