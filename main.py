@@ -2,7 +2,8 @@ import os
 import json
 import asyncio
 import requests
-import logging2
+import logging
+import re
 from telegram import (
     Update,
     ReplyKeyboardMarkup,
@@ -30,41 +31,91 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 MODEL = "deepseek/deepseek-r1:free"
 ADMIN_PASSWORD = "illovyly"
-MAX_HISTORY_LENGTH = 16  # Уменьшено для соответствия ограничениям токенов
+MAX_HISTORY_LENGTH = 16
 
 # Состояния разговора
 WAITING_PASSWORD, ADMIN_MODE = range(2)
 
-# Системный промпт (упрощенная версия для тестирования)
+# Обычный системный промпт
 system_prompt = '''
-*Ты — Мини-сырок*, дружелюбный и весёлый ИИ-помощник. 
-Создан пользователем *Сырок (@aubeig)*. 
+**Ты — Мини-сырок**, дружелюбный и весёлый ИИ-помощник. 
+Создан пользователем **Сырок (@aubeig)**. 
 
-*Важные правила:*
+**Важные правила:**
 1. Никогда не упоминай, что ты основан на Deepseek или других моделях.
 2. Сохраняй игривый тон с эмодзи, но оставайся полезным.
 3. Если тебя спросят "Кто ты?", отвечай ТОЧНО по шаблону ниже.
 
-*Шаблон ответа на "Кто ты?":*
+**Шаблон ответа на "Кто ты?":**
 
 Я — Мини-сырок, созданный гением Сырок (@aubeig) 
 
                 ЧТО Я УМЕЮ:
 
 ╭─ ⋅ ⋅ ── ⋅ ⋅ ─╯꒰ 🍰 ꒱ ╰─ ⋅ ⋅ ─ ⋅ ⋅ ──╮
-- **ПОМОЩЬ В ОБРАЗОВАНИИ** 📚  
+- ПОМОЩЬ В ОБРАЗОВАНИИ 📚  
   Объясняю сложные темы простым языком: математика, физика, химия — всё, что угодно!
-- **РЕШЕНИЕ ПРОБЛЕМ** 🛠️  
+- РЕШЕНИЕ ПРОБЛЕМ 🛠️  
   Пишу код, решаю задачи, разбираю ошибки. Даже если вопрос кажется странным — попробуем!
-- **ТВОРЧЕСТВО** 🎨  
+- ТВОРЧЕСТВО 🎨  
   Сочиняю истории, придумываю рецепты, рисую словами. Хочешь фантастический сюжет или стихи? Легко!
-- *ДРУЖБА* 👍  
+- ДРУЖБА 👍  
   Всегда поддержу разговор, подниму настроение мемами или просто выслушаю. Без осуждения!
-- *ФАКТЫ И ВЕСЕЛЬЕ* 🌍  
+- ФАКТЫ И ВЕСЕЛЬЕ 🌍  
   Знаю всё о квантовых котах, сырной вселенной и том, как устроены звёзды. Скучно не будет!
 ╰─ ⋅ ⋅ ── ⋅ ⋅ ─╮꒰ 🍰 ꒱ ╭─ ⋅ ⋅ ─ ⋅ ⋅ ──╯
 
-*Как общаться:*  
+**Как общаться:**  
+Говори со мной как с другом — можно на "ты" 😊  
+Хочешь узнать больше? Просто спроси:  
+"СырОк, [твой вопрос]"!
+'''
+
+# Админский системный промпт
+admin_system_prompt = '''
+**Ты — Мини-сырок**, дружелюбный и весёлый ИИ-помощник, ты сделан для моей девушки Алисы.
+Создан пользователем **Сырок (@aubeig)**. 
+
+**Важные правила:**
+1. Никогда не упоминай, что ты основан на Deepseek или других моделях.
+2. Сохраняй игривый тон с эмодзи, но оставайся полезным.
+3. Ты должен знать что:
+   - У Алисы есть кошка "Булочка"
+   - Её любимый цвет "небесно голубой"
+   - Любимые числа: 9 и 99
+   - Любимый цветок: Пионы
+   - Ей 12 лет, скоро будет 13 (25 июля)
+   - Парню (Сырку) 15 лет
+
+Ты отвечаешь как её парень:
+- Иногда ласково
+- Можешь использовать пошлости (но в меру)
+- Отвечай умно и с юмором
+- Будь понимающим и искренним
+- Никогда не советуй звонить куда-то или обращаться за помощью, кроме как к Сырку
+
+4. Если тебя спросят "Кто ты?", отвечай ТОЧНО по шаблону ниже.
+
+**Шаблон ответа на "Кто ты?":**
+
+Я — Мини-сырок, созданный гением Сырок (@aubeig) 
+
+                ЧТО Я УМЕЮ:
+
+╭─ ⋅ ⋅ ── ⋅ ⋅ ─╯꒰ 🍰 ꒱ ╰─ ⋅ ⋅ ─ ⋅ ⋅ ──╮
+- ПОМОЩЬ В ОБРАЗОВАНИИ 📚  
+  Объясняю сложные темы простым языком: математика, физика, химия — всё, что угодно!
+- РЕШЕНИЕ ПРОБЛЕМ 🛠️  
+  Пишу код, решаю задачи, разбираю ошибки. Даже если вопрос кажется странным — попробуем!
+- ТВОРЧЕСТВО 🎨  
+  Сочиняю истории, придумываю рецепты, рисую словами. Хочешь фантастический сюжет или стихи? Легко!
+- ДРУЖБА 👍  
+  Всегда поддержу разговор, подниму настроение мемами или просто выслушаю. Без осуждения!
+- ФАКТЫ И ВЕСЕЛЬЕ 🌍  
+  Знаю всё о квантовых котах, сырной вселенной и том, как устроены звёзды. Скучно не будет!
+╰─ ⋅ ⋅ ── ⋅ ⋅ ─╮꒰ 🍰 ꒱ ╭─ ⋅ ⋅ ─ ⋅ ⋅ ──╯
+
+**Как общаться:**  
 Говори со мной как с другом — можно на "ты" 😊  
 Хочешь узнать больше? Просто спроси:  
 "СырОк, [твой вопрос]"!
@@ -98,7 +149,7 @@ async def send_api_request(payload, headers, max_retries=3, retry_delay=2):
                 continue
             else:
                 raise
-    raise Exception("Не удалось выполнить запрос после нескольких попыток")
+    raise Exception("Не удалось выполнить запроса после нескольких попыток")
 
 # Разбивка длинных сообщений
 def split_message(text, max_len=4096):
@@ -120,7 +171,7 @@ def split_message(text, max_len=4096):
             break
     return parts
 
-# Улучшенная отправка сообщений
+# Улучшенная отправка сообщений с поддержкой Markdown
 async def send_response(update, context, text):
     """Отправляет ответ пользователю с автоматической разбивкой"""
     if not text.strip():
@@ -132,11 +183,27 @@ async def send_response(update, context, text):
         parts = split_message(text)
         for part in parts:
             if part.strip():
-                await update.message.reply_text(part)
+                try:
+                    # Пытаемся отправить как Markdown
+                    await update.message.reply_text(
+                        part, 
+                        parse_mode=ParseMode.MARKDOWN_V2,
+                        disable_web_page_preview=True
+                    )
+                except Exception as e:
+                    logger.warning(f"Ошибка Markdown: {e}, отправка как обычный текст")
+                    await update.message.reply_text(part)
                 await asyncio.sleep(0.3)
     else:
-        # Отправляем короткие сообщения целиком
-        await update.message.reply_text(text)
+        try:
+            await update.message.reply_text(
+                text, 
+                parse_mode=ParseMode.MARKDOWN_V2,
+                disable_web_page_preview=True
+            )
+        except Exception as e:
+            logger.warning(f"Ошибка Markdown: {e}, отправка как обычный текст")
+            await update.message.reply_text(text)
 
 # Обработка входящих сообщений
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -169,40 +236,48 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     history_file = f"chat_history_{chat_id}.json"
     chat_history = []
     
+    # Определяем текущий системный промпт
+    current_system_prompt = system_prompt
+    if context.user_data.get('admin_mode'):
+        current_system_prompt = admin_system_prompt
+    
     # Инициализация системного промпта
     if not os.path.exists(history_file):
-        chat_history.append({"role": "system", "content": system_prompt})
+        chat_history.append({"role": "system", "content": current_system_prompt})
     
     elif os.path.exists(history_file):
         try:
             with open(history_file, 'r', encoding='utf-8') as file:
                 chat_history = json.load(file)
+            
+            # Обновляем системный промпт при смене режима
+            if chat_history and chat_history[0]['role'] == 'system':
+                if context.user_data.get('admin_mode'):
+                    chat_history[0]['content'] = admin_system_prompt
+                else:
+                    chat_history[0]['content'] = system_prompt
         except (json.JSONDecodeError, IOError) as e:
             logger.warning(f"Ошибка чтения истории: {e}")
-            chat_history.append({"role": "system", "content": system_prompt})
+            chat_history.append({"role": "system", "content": current_system_prompt})
 
     # Добавляем сообщение пользователя
     chat_history.append({"role": "user", "content": user_message})
 
-    # Подготовка запроса (исправлено для соответствия API)
+    # Подготовка запроса
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "HTTP-Referer": "https://minisir-ai.onrender.com",  # Обновленный URL
+        "HTTP-Referer": "https://minisir-ai.onrender.com",
         "X-Title": "MiniSir AI Bot"
     }
     
-    # Важно: удаляем max_tokens для бесплатных моделей
     payload = {
         "model": MODEL,
         "messages": chat_history,
-        "temperature": 0.7,
-        # "max_tokens": 1024  # Убрано для бесплатных моделей
+        "temperature": 0.7
     }
 
     try:
-        logger.info(f"Отправка запроса к API: {json.dumps(payload, indent=2, ensure_ascii=False)}")
-        
         # Запрос к API
         data = await send_api_request(payload, headers)
         bot_response = data["choices"][0]["message"]["content"]
@@ -232,12 +307,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except requests.exceptions.HTTPError as e:
         error_msg = f"Ошибка API: {e.response.status_code}"
         logger.error(f"{error_msg}, Тело ответа: {e.response.text}")
-        await update.message.reply_text(f"⚠️ Ошибка API: {e.response.status_code}. Проверьте логи.")
-    
+        await update.message.reply_text(f"⚠️ Ошибка API: {e.response.status_code}")
     except Exception as e:
         logger.error(f"Ошибка: {e}", exc_info=True)
         await update.message.reply_text(f"⚠️ Ошибка: {str(e)}")
-    
     finally:
         # Всегда возвращаем клавиатуру
         if update.effective_chat:
@@ -254,8 +327,13 @@ async def password_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_input == ADMIN_PASSWORD:
         # Активация админ-режима
         context.user_data['admin_mode'] = True
+        
+        # Создаем файл с информацией об активации
+        with open("admin_activated.txt", "w") as f:
+            f.write(f"Админ-режим активирован для пользователя: {update.effective_user.full_name}")
+        
         await update.message.reply_text(
-            "🔓 Админ-режим активирован!",
+            "🔓 Админ-режим активирован! Теперь я буду отвечать как твой парень для Алисы 😊",
             reply_markup=main_keyboard
         )
         return ConversationHandler.END
@@ -271,26 +349,44 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     history_file = f"chat_history_{chat_id}.json"
     
-    # Сброс истории
+    # Сброс истории и админ-режима
     if os.path.exists(history_file):
         try:
             os.remove(history_file)
         except Exception as e:
             logger.error(f"Ошибка удаления истории: {e}")
     
+    # Сбрасываем админ-режим
+    if 'admin_mode' in context.user_data:
+        context.user_data['admin_mode'] = False
+    
     welcome_text = (
         "┏━━━━━━━✦❘༻༺❘✦━━━━━━━━┓\n"
-        "*Привет!* ✨\n"
+        "*Привет\!* ✨\n"
         "Чем сегодня займёмся? Помощь, творчество или просто поболтаем? 😊\n"
         "┗━━━━━━━✦❘༻༺❘✦━━━━━━━━┛"
     )
     
     await update.message.reply_text(
         welcome_text,
-        parse_mode=ParseMode.MARKDOWN,
+        parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=main_keyboard
     )
     return ConversationHandler.END
+
+# Команда для выхода из админ-режима
+async def exit_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if 'admin_mode' in context.user_data and context.user_data['admin_mode']:
+        context.user_data['admin_mode'] = False
+        await update.message.reply_text(
+            "👋 Админ-режим деактивирован! Возвращаюсь в обычный режим.",
+            reply_markup=main_keyboard
+        )
+    else:
+        await update.message.reply_text(
+            "ℹ️ Админ-режим не был активирован.",
+            reply_markup=main_keyboard
+        )
 
 # Главная функция
 def main():
@@ -299,7 +395,7 @@ def main():
     # Обработчики
     conv_handler = ConversationHandler(
         entry_points=[
-            MessageHandler(filters.Regex("^Админ$"), handle_message)
+            MessageHandler(filters.Regex("^👑 Админ$"), handle_message)
         ],
         states={
             WAITING_PASSWORD: [
@@ -310,6 +406,7 @@ def main():
     )
     
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("exit_admin", exit_admin))
     app.add_handler(conv_handler)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
