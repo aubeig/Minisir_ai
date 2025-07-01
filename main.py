@@ -6,8 +6,7 @@ import logging
 from telegram import (
     Update,
     ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
-    ChatAction
+    ReplyKeyboardRemove
 )
 from telegram.ext import (
     Application,
@@ -17,7 +16,9 @@ from telegram.ext import (
     ConversationHandler,
     filters
 )
-from telegram.constants import ParseMode
+from telegram.constants import ChatAction, ParseMode  # Исправленный импорт
+
+# Остальной код остается без изменений...
 
 # Настройка логгера
 logging.basicConfig(
