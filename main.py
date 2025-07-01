@@ -16,9 +16,7 @@ from telegram.ext import (
     ConversationHandler,
     filters
 )
-from telegram.constants import ChatAction, ParseMode  # Исправленный импорт
-
-# Остальной код остается без изменений...
+from telegram.constants import ChatAction, ParseMode
 
 # Настройка логгера
 logging.basicConfig(
@@ -30,8 +28,9 @@ logger = logging.getLogger(__name__)
 # Конфигурация
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-MODEL = "mistralai/mistral-7b-instruct:free"
-ADMIN_PASSWORD = "illovyly"  # Пароль для админ-режима
+MODEL = "deepseek/deepseek-r1:free"
+ADMIN_PASSWORD = "illovyly"
+MAX_HISTORY_LENGTH = 10  # Ограничение истории сообщений
 
 # Состояния разговора
 WAITING_PASSWORD, ADMIN_MODE = range(2)
@@ -101,18 +100,40 @@ async def send_api_request(payload, headers, max_retries=3, retry_delay=2):
 
 # Разбивка длинных сообщений
 def split_message(text, max_len=4096):
-    return [text[i:i+max_len] for i in range(0, len(text), max_len)]
+    parts = []
+    while text:
+        if len(text) > max_len:
+            # Ищем место для разбивки
+            split_index = text.rfind('\n', 0, max_len)
+            if split_index == -1:
+                split_index = text.rfind('. ', 0, max_len)
+            if split_index == -1:
+                split_index = text.rfind(' ', 0, max_len)
+            if split_index == -1:
+                split_index = max_len
+                
+            parts.append(text[:split_index].strip())
+            text = text[split_index:].strip()
+        else:
+            parts.append(text.strip())
+            break
+    return parts
 
-# Плавная отправка сообщения
+# Плавная отправка сообщения (с защитой от пустых сообщений)
 async def stream_message(update, context, text):
+    if not text or not text.strip():
+        logger.warning("Попытка отправить пустое сообщение")
+        return
+    
     message = ""
     for char in text:
         message += char
         if char in "\n .,!?;:" or len(message) >= 100:
-            await update.message.reply_text(message)
+            if message.strip():  # Проверка на непустое сообщение
+                await update.message.reply_text(message)
             message = ""
             await asyncio.sleep(0.1)
-    if message:
+    if message.strip():  # Проверка на непустое сообщение
         await update.message.reply_text(message)
 
 # Обработка входящих сообщений
@@ -180,25 +201,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data = await send_api_request(payload, headers)
         bot_response = data["choices"][0]["message"]["content"]
         
-        if not bot_response.strip():
-            raise ValueError("Пустой ответ от API")
+        # Проверка на пустой ответ
+        if not bot_response or not bot_response.strip():
+            logger.warning("API вернул пустой ответ")
+            await update.message.reply_text("🤔 Я не смог придумать ответ. Попробуй задать вопрос иначе!")
+            return
 
         # Сохранение истории
         chat_history.append({"role": "assistant", "content": bot_response})
         
         # Ограничение истории
-        if len(chat_history) > 20:
-            chat_history = [chat_history[0]] + chat_history[-19:]
+        if len(chat_history) > MAX_HISTORY_LENGTH:
+            # Сохраняем системный промпт и последние сообщения
+            system_msg = chat_history[0]
+            recent_msgs = chat_history[-(MAX_HISTORY_LENGTH-1):]
+            chat_history = [system_msg] + recent_msgs
         
         with open(history_file, 'w', encoding='utf-8') as file:
             json.dump(chat_history, file, ensure_ascii=False, indent=2)
 
-        # Отправка ответа с разбивкой
+        # Отправка ответа с разбивкой и защитой от пустых сообщений
         if len(bot_response) > 4000:
             parts = split_message(bot_response)
             for part in parts:
-                await update.message.reply_text(part)
-                await asyncio.sleep(0.5)
+                if part.strip():  # Проверка на непустую часть
+                    await update.message.reply_text(part)
+                    await asyncio.sleep(0.5)
         else:
             await stream_message(update, context, bot_response)
 
@@ -212,11 +240,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⚠️ Ошибка: {str(e)}")
     
     finally:
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text="Чем еще могу помочь?",
-            reply_markup=main_keyboard
-        )
+        # Проверяем, что бот не пытается отправить пустое сообщение
+        if update.effective_chat:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="Чем еще могу помочь?",
+                reply_markup=main_keyboard
+            )
 
 # Обработка пароля
 async def password_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -258,6 +288,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=main_keyboard
     )
+    return ConversationHandler.END
 
 # Главная функция
 def main():
@@ -273,7 +304,7 @@ def main():
                 MessageHandler(filters.TEXT & ~filters.COMMAND, password_handler)
             ]
         },
-        fallbacks=[]
+        fallbacks=[CommandHandler("start", start)]
     )
     
     app.add_handler(CommandHandler("start", start))
