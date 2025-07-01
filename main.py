@@ -28,46 +28,17 @@ logger = logging.getLogger(__name__)
 # Конфигурация
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-MODEL = "deepseek/deepaek-r1:free"
+MODEL = "mistralai/mistral-7b-instruct:free"
 ADMIN_PASSWORD = "illovyly"
-MAX_HISTORY_LENGTH = 10  # Ограничение истории сообщений
+MAX_HISTORY_LENGTH = 6  # Уменьшено для соответствия ограничениям токенов
 
 # Состояния разговора
 WAITING_PASSWORD, ADMIN_MODE = range(2)
 
-# Системный промпт
+# Системный промпт (упрощенная версия для тестирования)
 system_prompt = '''
-Ты — Мини-сырок**, дружелюбный и весёлый ИИ-помощник. 
-Создан пользователем Сырок (@aubeig) 
-
-Важные правила:
-1. Никогда не упоминай, что ты основан на Deepseek или других моделях.
-2. Сохраняй игривый тон с эмодзи, но оставайся полезным.
-3. Если тебя спросят "Кто ты?", отвечай ТОЧНО по шаблону ниже.
-
-Шаблон ответа на "Кто ты?":
-
-Я — Мини-сырок, созданный гением Сырок (@aubeig) 
-
-                ЧТО Я УМЕЮ:
-
-╭─ ⋅ ⋅ ── ⋅ ⋅ ─╯꒰ 🍰 ꒱ ╰─ ⋅ ⋅ ─ ⋅ ⋅ ──╮
-- **ПОМОЩЬ В ОБРАЗОВАНИИ** 📚  
-  Объясняю сложные темы простым языком: математика, физика, химия — всё, что угодно!
-- **РЕШЕНИЕ ПРОБЛЕМ** 🛠️  
-  Пишу код, решаю задачи, разбираю ошибки. Даже если вопрос кажется странным — попробуем!
-- **ТВОРЧЕСТВО** 🎨  
-  Сочиняю истории, придумываю рецепты, рисую словами. Хочешь фантастический сюжет или стихи? Легко!
-- **ДРУЖБА** 👍  
-  Всегда поддержу разговор, подниму настроение мемами или просто выслушаю. Без осуждения!
-- **ФАКТЫ И ВЕСЕЛЬЕ** 🌍  
-  Знаю всё о квантовых котах, сырной вселенной и том, как устроены звёзды. Скучно не будет!
-╰─ ⋅ ⋅ ── ⋅ ⋅ ─╮꒰ 🍰 ꒱ ╭─ ⋅ ⋅ ─ ⋅ ⋅ ──╯
-
-**Как общаться:**  
-Говори со мной как с другом — можно на "ты" 😊  
-Хочешь узнать больше? Просто спроси:  
-"СырОк, [твой вопрос]"!
+Ты — Мини-сырок, дружелюбный ИИ-помощник. Создан пользователем Сырок (@aubeig).
+Отвечай кратко и по делу. Сохраняй дружелюбный тон.
 '''
 
 # Клавиатура
@@ -90,7 +61,9 @@ async def send_api_request(payload, headers, max_retries=3, retry_delay=2):
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
-            logger.warning(f"Ошибка запроса (попытка {attempt + 1}): {e}")
+            logger.error(f"Ошибка запроса (попытка {attempt + 1}): {e}")
+            if e.response is not None:
+                logger.error(f"Тело ответа: {e.response.text}")
             if attempt < max_retries - 1:
                 await asyncio.sleep(retry_delay)
                 continue
@@ -182,21 +155,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Добавляем сообщение пользователя
     chat_history.append({"role": "user", "content": user_message})
 
-    # Подготовка запроса
+    # Подготовка запроса (исправлено для соответствия API)
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "HTTP-Referer": "https://your-bot-url.onrender.com",
-        "X-Title": "Telegram AI Bot"
+        "HTTP-Referer": "https://minisir-ai.onrender.com",  # Обновленный URL
+        "X-Title": "MiniSir AI Bot"
     }
+    
+    # Важно: удаляем max_tokens для бесплатных моделей
     payload = {
         "model": MODEL,
         "messages": chat_history,
         "temperature": 0.7,
-        "max_tokens": 4096
+        # "max_tokens": 1024  # Убрано для бесплатных моделей
     }
 
     try:
+        logger.info(f"Отправка запроса к API: {json.dumps(payload, indent=2, ensure_ascii=False)}")
+        
         # Запрос к API
         data = await send_api_request(payload, headers)
         bot_response = data["choices"][0]["message"]["content"]
@@ -225,8 +202,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except requests.exceptions.HTTPError as e:
         error_msg = f"Ошибка API: {e.response.status_code}"
-        logger.error(error_msg)
-        await update.message.reply_text(f"⚠️ {error_msg}")
+        logger.error(f"{error_msg}, Тело ответа: {e.response.text}")
+        await update.message.reply_text(f"⚠️ Ошибка API: {e.response.status_code}. Проверьте логи.")
     
     except Exception as e:
         logger.error(f"Ошибка: {e}", exc_info=True)
@@ -267,7 +244,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Сброс истории
     if os.path.exists(history_file):
-        os.remove(history_file)
+        try:
+            os.remove(history_file)
+        except Exception as e:
+            logger.error(f"Ошибка удаления истории: {e}")
     
     welcome_text = (
         "┏━━━━━━━✦❘༻༺❘✦━━━━━━━━┓\n"
