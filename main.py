@@ -81,7 +81,7 @@ system_prompt = '''
    - Заголовки выделяй жирным
    - Списки оформляй через дефис
    - Эмодзи используй для акцентов 🎯
-   - Для кода используй \`монопространство\`
+   - Для кода используй ```монопространство```
 '''
 
 # Админский системный промпт
@@ -293,7 +293,7 @@ async def send_response(update, context, text):
                     escaped_text = escape_markdown(part)
                     await update.message.reply_text(
                         escaped_text, 
-                        parse_mode=ParseMode.MARKDOWN,
+                        parse_mode=ParseMode.MARKDOWN_V2,
                         disable_web_page_preview=True
                     )
                 except Exception as e:
@@ -305,7 +305,7 @@ async def send_response(update, context, text):
             escaped_text = escape_markdown(text)
             await update.message.reply_text(
                 escaped_text, 
-                parse_mode=ParseMode.MARKDOWN,
+                parse_mode=ParseMode.MARKDOWN_V2,
                 disable_web_page_preview=True
             )
         except Exception as e:
@@ -476,7 +476,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(
         welcome_text,
-        parse_mode=ParseMode.MARKDOWN,
+        parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=main_keyboard
     )
     return ConversationHandler.END
