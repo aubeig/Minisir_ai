@@ -274,12 +274,15 @@ def split_message(text, max_len=4096):
             break
     return parts
 
-# Улучшенная отправка сообщений с поддержкой Markdown
 async def send_response(update, context, text):
-    """Отправляет ответ пользователю с автоматической разбивкой"""
     if not text.strip():
         logger.warning("Попытка отправить пустое сообщение")
         return
+    
+    # Функция для экранирования спецсимволов
+    def escape_markdown(text):
+        escape_chars = '_*[]()~`>#+-=|{}.!'
+        return ''.join('\\' + char if char in escape_chars else char for char in text)
     
     # Разбиваем длинные сообщения
     if len(text) > 4000:
@@ -287,9 +290,9 @@ async def send_response(update, context, text):
         for part in parts:
             if part.strip():
                 try:
-                    # Пытаемся отправить как Markdown
+                    escaped_text = escape_markdown(part)
                     await update.message.reply_text(
-                        part, 
+                        escaped_text, 
                         parse_mode=ParseMode.MARKDOWN_V2,
                         disable_web_page_preview=True
                     )
@@ -299,8 +302,9 @@ async def send_response(update, context, text):
                 await asyncio.sleep(0.3)
     else:
         try:
+            escaped_text = escape_markdown(text)
             await update.message.reply_text(
-                text, 
+                escaped_text, 
                 parse_mode=ParseMode.MARKDOWN_V2,
                 disable_web_page_preview=True
             )
