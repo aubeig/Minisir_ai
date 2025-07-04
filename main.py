@@ -18,6 +18,7 @@ from telegram.ext import (
     filters
 )
 from telegram.constants import ChatAction, ParseMode
+from flask import Flask, jsonify  # Добавлено для пингов
 
 # Настройка логгера
 logging.basicConfig(
@@ -32,6 +33,7 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 MODEL = "deepseek/deepseek-r1:free"
 ADMIN_PASSWORD = "illovyly"
 MAX_HISTORY_LENGTH = 16
+THINKING_MESSAGE = "🤔 Думаю..."  # Индикатор мышления
 
 # Состояния разговора
 WAITING_PASSWORD, ADMIN_MODE = range(2)
@@ -231,6 +233,13 @@ main_keyboard = ReplyKeyboardMarkup(
     input_field_placeholder="Выберите действие..."
 )
 
+# Flask приложение для пингов
+flask_app = Flask(__name__)
+
+@flask_app.route('/ping')
+def ping_endpoint():
+    return jsonify({"status": "alive", "service": "telegram-bot"}), 200
+
 # Функция для отправки запросов с повторными попытками
 async def send_api_request(payload, headers, max_retries=3, retry_delay=2):
     for attempt in range(max_retries):
@@ -279,14 +288,17 @@ async def send_response(update, context, text):
         logger.warning("Попытка отправить пустое сообщение")
         return
     
+    # Добавляем индикатор завершения обработки
+    processed_text = f"⚙️ *Обработка завершена:*\n\n{text}"
+    
     # Функция для экранирования спецсимволов
     def escape_markdown(text):
         escape_chars = '_*[]()~`>#+-=|{}.!'
         return ''.join('\\' + char if char in escape_chars else char for char in text)
     
     # Разбиваем длинные сообщения
-    if len(text) > 4000:
-        parts = split_message(text)
+    if len(processed_text) > 4000:
+        parts = split_message(processed_text)
         for part in parts:
             if part.strip():
                 try:
@@ -302,7 +314,7 @@ async def send_response(update, context, text):
                 await asyncio.sleep(0.3)
     else:
         try:
-            escaped_text = escape_markdown(text)
+            escaped_text = escape_markdown(processed_text)
             await update.message.reply_text(
                 escaped_text, 
                 parse_mode=ParseMode.MARKDOWN_V2,
@@ -310,19 +322,30 @@ async def send_response(update, context, text):
             )
         except Exception as e:
             logger.warning(f"Ошибка Markdown: {e}, отправка как обычный текст")
-            await update.message.reply_text(text)
+            await update.message.reply_text(processed_text)
 
 # Обработка входящих сообщений
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_message = update.message.text.strip()
     
+    # Отправляем индикатор "Думаю..."
+    thinking_msg = await update.message.reply_text(THINKING_MESSAGE)
+    
     # Обработка кнопок
     if user_message == "✍️ Начать":
         await start(update, context)
+        await context.bot.delete_message(
+            chat_id=chat_id,
+            message_id=thinking_msg.message_id
+        )
         return
     
     elif user_message == "👑 Админ":
+        await context.bot.delete_message(
+            chat_id=chat_id,
+            message_id=thinking_msg.message_id
+        )
         await update.message.reply_text(
             "🔒 Введите пароль для доступа к админ-режиму:",
             reply_markup=ReplyKeyboardRemove()
@@ -330,6 +353,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return WAITING_PASSWORD
     
     elif user_message == "🧩 Тех.поддержка":
+        await context.bot.delete_message(
+            chat_id=chat_id,
+            message_id=thinking_msg.message_id
+        )
         await update.message.reply_text(
             "🛠️ Свяжитесь с техподдержкой:\nhttps://t.me/Aubeig",
             reply_markup=main_keyboard
@@ -408,16 +435,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with open(history_file, 'w', encoding='utf-8') as file:
             json.dump(chat_history, file, ensure_ascii=False, indent=2)
 
+        # Удаляем индикатор "Думаю..." перед отправкой ответа
+        await context.bot.delete_message(
+            chat_id=chat_id,
+            message_id=thinking_msg.message_id
+        )
+        
         # Отправляем ответ пользователю
         await send_response(update, context, bot_response)
 
     except requests.exceptions.HTTPError as e:
+        await context.bot.delete_message(
+            chat_id=chat_id,
+            message_id=thinking_msg.message_id
+        )
         error_msg = f"Ошибка API: {e.response.status_code}"
         logger.error(f"{error_msg}, Тело ответа: {e.response.text}")
         await update.message.reply_text(f"⚠️ Ошибка API: {e.response.status_code}")
     except Exception as e:
+        # Редактируем индикатор в сообщение об ошибке
+        await thinking_msg.edit_text(f"⚠️ Ошибка: {str(e)}")
         logger.error(f"Ошибка: {e}", exc_info=True)
-        await update.message.reply_text(f"⚠️ Ошибка: {str(e)}")
     finally:
         # Всегда возвращаем клавиатуру
         if update.effective_chat:
@@ -498,6 +536,10 @@ async def exit_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Главная функция
 def main():
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    
+    # Запускаем Flask в отдельном потоке для пингов
+    from threading import Thread
+    Thread(target=lambda: flask_app.run(port=5000, host="0.0.0.0"), daemon=True).start()
     
     # Обработчики
     conv_handler = ConversationHandler(
