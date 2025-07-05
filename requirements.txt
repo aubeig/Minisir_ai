@@ -1,6 +1,12 @@
 python-telegram-bot==20.6
-requests
-Flask
-psycopg2-binary
-google-generativeai
-python-dotenv
+requests==2.31.0
+Flask==3.0.2
+psycopg2-binary==2.9.9
+google-generativeai==0.5.4
+SpeechRecognition==3.10.0
+Pillow==10.2.0
+python-dotenv==1.0.1
+gunicorn==21.2.0
+ffmpeg-python==0.2.0
+opencv-python-headless==4.9.0.80
+numpy==1.26.4
