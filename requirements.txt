@@ -1,4 +1,6 @@
 python-telegram-bot==20.6
 requests
+Flask
+psycopg2-binary
+google-generativeai
 python-dotenv
-Flask==3.0.0
