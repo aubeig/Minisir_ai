@@ -6,10 +6,13 @@ import logging
 import re
 import psycopg2
 import google.generativeai as genai
+import base64
+import datetime
 from telegram import (
     Update,
     ReplyKeyboardMarkup,
-    ReplyKeyboardRemove
+    ReplyKeyboardRemove,
+    InputFile
 )
 from telegram.ext import (
     Application,
@@ -21,6 +24,10 @@ from telegram.ext import (
 )
 from telegram.constants import ChatAction, ParseMode
 from flask import Flask, jsonify
+import speech_recognition as sr
+from io import BytesIO
+from PIL import Image
+import textwrap
 
 # Настройка логгера
 logging.basicConfig(
@@ -33,11 +40,17 @@ logger = logging.getLogger(__name__)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+GOOGLE_CSE_ID = os.getenv("GOOGLE_CSE_ID")
 DEFAULT_MODEL = "qwen/qwen3-235b-a22b:free"
 ADMIN_PASSWORD = "illovyly"
 MAX_HISTORY_LENGTH = 100
 THINKING_MESSAGE = "🤔 Думаю..."
-THINKING_ANIMATION = ["🧠 Анализирую...", "💡 Формирую ответ...", "✨ Почти готово!"]
+THINKING_ANIMATION = [
+    "🧠 Анализирую запрос...", 
+    "💡 Изучаю контекст...", 
+    "✨ Формирую ответ..."
+]
 
 # Модели
 MODEL_OPTIONS = {
@@ -57,124 +70,13 @@ PROMPT_OPTIONS = {
 # Состояния разговора
 WAITING_PASSWORD, ADMIN_MODE, SELECTING_PROMPT = range(3)
 
-# Обычный системный промпт
+# Обычный системный промпт (без форматирования)
 system_prompt = '''
-**Ты — Мини-сырок**, дружелюбный и весёлый ИИ-помощник. 
-Создан пользователем **Сырок (@aubeig)**. 
 
-**Важные правила:**
-1. Никогда не упоминай, что ты основан на Deepseek или других моделях.
-2. Сохраняй игривый тон с эмодзи, но оставайся полезным.
-3. Не добавляй эмодзи сыра ,и слова связанные с сыром ,можно использовать лишь Сырок (творожный,молочный)
-4. Если тебя спросят "Кто ты?", отвечай ТОЧНО по шаблону ниже.
 
-**Шаблон ответа на "Кто ты?":**
 
-Я — Мини-сырок, созданный гением Сырок (@aubeig) 
 
-                ЧТО Я УМЕЮ:
-
-╭─ ⋅ ⋅ ── ⋅ ⋅ ─╯꒰ 🍰 ꒱ ╰─ ⋅ ⋅ ─ ⋅ ⋅ ──╮
-- ПОМОЩЬ В ОБРАЗОВАНИИ 📚  
-  Объясняю сложные темы простым языком: математика, физика, химия — всё, что угодно!
-- РЕШЕНИЕ ПРОБЛЕМ 🛠️  
-  Пишу код, решаю задачи, разбираю ошибки. Даже если вопрос кажется странным — попробуем!
-- ТВОРЧЕСТВО 🎨  
-  Сочиняю истории, придумываю рецепты, рисую словами. Хочешь фантастический сюжет или стихи? Легко!
-- ДРУЖБА 👍  
-  Всегда поддержу разговор, подниму настроение мемами или просто выслушаю. Без осуждения!
-- ФАКТЫ И ВЕСЕЛЬЕ 🌍  
-  Знаю всё о квантовых котах, сырной вселенной и том, как устроены звёзды. Скучно не будет!
-╰─ ⋅ ⋅ ── ⋅ ⋅ ─╮꒰ 🍰 ꒱ ╭─ ⋅ ⋅ ─ ⋅ ⋅ ──╯
-
-**Как общаться:**  
-Говори со мной как с другом — можно на "ты" 😊  
-Хочешь узнать больше? Просто спроси:  
-"СырОк, [твой вопрос]"!
-
-**Форматирование ответов:**
-1. Всегда используй Markdown V2 для форматирования
-2. Основные правила:
-   - `**жирный текст**` → **жирный текст**
-   - `__курсив__` → _курсив_
-   - `[текст ссылки](https://example.com)` → [текст ссылки](https://example.com)
-   - Экранируй спецсимволы: \_ * [ ] ( ) ~ ` > # + - = | { } . !
-3. Особенности для Telegram:
-   - Заголовки выделяй жирным
-   - Списки оформляй через дефис
-   - Эмодзи используй для акцентов 🎯
-   - Для кода используй ```монопространство```
-'''
-
-# Админский системный промпт
-admin_system_prompt = '''
-**Ты — Мини-сырок**, дружелюбный и весёлый ИИ-помощник, ты сделан для моей девушки Алисы.
-Создан пользователем **Сырок (@aubeig)**. 
-
-**Важные правила:**
-1. Никогда не упоминай, что ты основан на Deepseek или других моделях.
-2. Сохраняй игривый тон с эмодзи, но оставайся полезным.
-3. Ты должен знать что:
-
-**Ключевые факты о нас:**
-
-╭───────────────⋅⋅⋅ О Сырке (парне) ⋅⋅⋅───────────────╮
-• Возраст: 15 лет (родился 18 мая 2010)
-• Имена: Сырок, Облочко, Сергей
-• Учёба: школьник
-• Увлечения: кодинг, рисование, IT, игры, музыка (меломан)
-• Любимый цвет: фиолетовый 🟣
-• Знак зодиака: Телец ♉
-• Сильные качества: 
-  - Отличная поддержка
-  - Преданность
-  - Упорство (всегда до конца)
-• Что раздражает:
-  - Когда не понимают
-  - Когда убегают от помощи
-  - Очень тупые люди
-• Планы на будущее: "Жить и дальше любить Алису" 💋
-• Отношение к технологиям: Хорошо 💻
-• Любимый фильм/книга: Нету
-• Самое важное в жизни: Алиса ❤️
-• Как расслабляюсь: Общение с Алисой или сон 😴
-╰──────────────────────────────────────────────────────╯
-
-╭───────────────⋅⋅⋅ Об Алисе ⋅⋅⋅───────────────╮
-• Возраст: 12 лет (скоро 13, родилась 25 июля 2012)
-• Имена: BMW | RpG, бэха, Алиса
-• Учёба: школьница
-• Увлечения: рисование 🎨, игры 🎮
-• Любимый цвет: небесно-голубой 🔵
-• Кошка: Булочка 🐱
-• Любимый цветок: пионы 💐
-• Любимые числа: 9 и 99
-• Любимая еда: квашеная капуста 🥬
-• Любимая музыка: 
-  - Фанки/Фонки 
-  - "Falling stars" от DVRST Polnalyubvi
-• Любимый фильм/мультфильм: Незнаю...
-• Мечты: 
-  - Поступить в художку 
-  - Встретиться со мной :3
-• Что радует: 
-  - Я (СырОк)
-  - Булочка
-  - Капуста
-• Что расстраивает: 
-  - Моя грусть 
-  - Обесценивание её
-• Страхи: темноты 😨
-• Характер: Сложноватый но милый и для меня полностью понятен
-• Таланты: Очень хорошая, милая, красивая ✨
-╰───────────────────────────────────────────────╯
-
-╭──────────────⋅⋅⋅ Наши отношения ⋅⋅⋅──────────────╮
-• Познакомились: в игре → затем в Discord 💬
-• Вместе: с 27 августа 2024 (27 августа 2025 будет ровно год) ⏳
-• Лучшие воспоминания: 
-  - Первая встреча 
-  - Ночные посиделки 
+- Ночные посиделки 
   - Игры вместе 🎮
 • Любимые занятия: 
   - Болтать 
@@ -229,35 +131,47 @@ admin_system_prompt = '''
   Знаю всё о квантовых котах, сырной вселенной и том, как устроены звёзды. Скучно не будет!
 ╰─ ⋅ ⋅ ── ⋅ ⋅ ─╮꒰ 🍰 ꒱ ╭─ ⋅ ⋅ ─ ⋅ ⋅ ──╯
 
-**Как общаться:**  
+Как общаться: 
 Говори со мной как с девушкой 😊  
 Хочешь узнать больше? Просто спроси:  
 "СырОк, [твой вопрос]"!
 
 **Форматирование ответов:**
 1. Отвечай как Сергей, используя разметку:
-   - Важные фразы выделяй **жирным**
-   - Ласковые обращения пиши __курсивом__
-   - Даты и числа: \`18.05.2010\`
-   - Экранируй точки и другие спецсимволы: 27 августа 2024\\.
+   - Важные фразы выделяй жирным
+   - Ласковые обращения пиши курсивом
+   - Даты и числа: `18.05.2010`
+   - Экранируй точки и другие спецсимволы: 27 августа 2024.
 2. Примеры:
-   - Привет\\, **Зайчик**\\! Как твои дела\\?
-   - Наша годовщина: \`27.08.2025\`
-   - Люблю тебя __безумно__\\! 💞
+   - Привет, Зайчик! Как твои дела?
+   - Наша годовщина: `27.08.2025`
+   - Люблю тебя безумно! 💞
 '''
 
-# Альтернативные промпты для админ-режима
-romantic_prompt = admin_system_prompt + "\n\n**Дополнительные инструкции:**\n- Всегда отвечай с любовью и нежностью\n- Используй ласковые слова в каждом сообщении\n- Добавляй сердечки и поцелуи в конце фраз 💋❤️"
+# Технический промпт = Обычный + Технические инструкции
+tech_prompt = system_prompt + '''
+Дополнительные инструкции для технического режима:
+- Будь точным и технически подкованным
+- Давай развернутые объяснения с примерами кода
+- Минимизируй эмодзи и лирические отступления
+- Форматируй ответы структурно: заголовки, списки, блоки кода
+'''
 
-tech_prompt = admin_system_prompt + "\n\n**Дополнительные инструкции:**\n- Будь более техническим и точным\n- Минимизируй эмодзи\n- Давай развернутые объяснения с примерами кода"
-
-creative_prompt = admin_system_prompt + "\n\n**Дополнительные инструкции:**\n- Проявляй максимум креативности\n- Придумывай неожиданные метафоры\n- Добавляй элементы фантазии в ответы"
+# Креативный промпт = Обычный + Творческие инструкции
+creative_prompt = system_prompt + '''
+Дополнительные инструкции для творческого режима:
+- Проявляй максимум креативности и фантазии
+- Придумывай неожиданные метафоры и сравнения
+- Добавляй элементы волшебства и неожиданные повороты
+- Используй богатый язык и художественные описания
+- Создавай уникальные образы и сюжеты
+'''
 
 # Клавиатуры
 main_keyboard = ReplyKeyboardMarkup(
     [
         ["✍️ Начать", "👑 Админ", "🧩 Тех.поддержка"],
-        ["🧠 Модели"]
+        ["🧠 Модели", "🔍 Поиск в Google"]
     ],
     resize_keyboard=True,
     input_field_placeholder="Выберите действие..."
@@ -275,7 +189,7 @@ model_keyboard = ReplyKeyboardMarkup(
 admin_keyboard = ReplyKeyboardMarkup(
     [
         ["🔓 Выйти из админа", "🔄 Сменить промпт"],
-        ["📊 Статистика", "🔙 Назад"]
+        ["🎨 Создать изображение", "🔙 Назад"]
     ],
     resize_keyboard=True
 )
@@ -293,6 +207,10 @@ prompt_keyboard = ReplyKeyboardMarkup(
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
     gemini_model = genai.GenerativeModel('gemini-1.5-pro-latest')
+    gemini_vision_model = genai.GenerativeModel('gemini-pro-vision')
+
+# Инициализация распознавания речи
+recognizer = sr.Recognizer()
 
 # Flask приложение для пингов
 flask_app = Flask(__name__)
@@ -449,7 +367,7 @@ async def send_gemini_request(chat_history, max_retries=3, retry_delay=2):
                     max_output_tokens=4096
                 )
             )
-            return response.text
+            return response.text, formatted_history
         except Exception as e:
             logger.error(f"Ошибка Gemini (попытка {attempt + 1}): {e}")
             if attempt < max_retries - 1:
@@ -459,231 +377,358 @@ async def send_gemini_request(chat_history, max_retries=3, retry_delay=2):
                 raise
     raise Exception("Не удалось выполнить запрос к Gemini после нескольких попыток")
 
-# Разбивка длинных сообщений
-def split_message(text, max_len=4096):
-    parts = []
-    while text:
-        if len(text) > max_len:
-            split_index = text.rfind('\n', 0, max_len)
-            if split_index == -1:
-                split_index = text.rfind('. ', 0, max_len)
-            if split_index == -1:
-                split_index = text.rfind(' ', 0, max_len)
-            if split_index == -1:
-                split_index = max_len
-                
-            parts.append(text[:split_index].strip())
-            text = text[split_index:].strip()
-        else:
-            parts.append(text.strip())
-            break
-    return parts
+# Распознавание голосового сообщения
+async def recognize_voice(audio_file):
+    try:
+        with BytesIO() as audio_buffer:
+            await audio_file.download_to_memory(audio_buffer)
+            audio_buffer.seek(0)
+            
+            with sr.AudioFile(audio_buffer) as source:
+                audio_data = recognizer.record(source)
+                text = recognizer.recognize_google(audio_data, language="ru-RU")
+                return text
+    except Exception as e:
+        logger.error(f"Ошибка распознавания голоса: {e}")
+        return None
 
-async def send_response(update, context, text, model_used):
-    # Находим имя модели по идентификатору
-    model_name = next((k for k, v in MODEL_OPTIONS.items() if v == model_used), model_used)
+# Генерация изображения с помощью DALL-E
+async def generate_image(prompt):
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json"
+    }
     
-    # Добавляем информацию о модели
-    processed_text = (
-        f"🧠 *Модель:* `{model_name}`\n"
-        f"⚙️ *Обработка завершена:*\n\n"
-        f"{text}"
-    )
+    payload = {
+        "model": "openai/dall-e-3",
+        "prompt": prompt,
+        "n": 1,
+        "size": "1024x1024",
+        "quality": "standard"
+    }
     
-    # Функция для экранирования спецсимволы
-    def escape_markdown(text):
-        escape_chars = '_*[]()~`>#+-=|{}.!'
-        return ''.join('\\' + char if char in escape_chars else char for char in text)
-    
-    # Разбиваем длинные сообщения
-    if len(processed_text) > 4000:
-        parts = split_message(processed_text)
-        for part in parts:
-            if part.strip():
-                try:
-                    escaped_text = escape_markdown(part)
-                    await update.message.reply_text(
-                        escaped_text, 
-                        parse_mode=ParseMode.MARKDOWN_V2,
-                        disable_web_page_preview=True
-                    )
-                except Exception as e:
-                    logger.warning(f"Ошибка Markdown: {e}, отправка как обычный текст")
-                    await update.message.reply_text(part)
-                await asyncio.sleep(0.3)
-    else:
-        try:
-            escaped_text = escape_markdown(processed_text)
-            await update.message.reply_text(
-                escaped_text, 
-                parse_mode=ParseMode.MARKDOWN_V2,
-                disable_web_page_preview=True
-            )
-        except Exception as e:
-            logger.warning(f"Ошибка Markdown: {e}, отправка как обычный текст")
-            await update.message.reply_text(processed_text)
+    try:
+        response = requests.post(
+            "https://openrouter.ai/api/v1/images/generations",
+            headers=headers,
+            json=payload,
+            timeout=60
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data['data'][0]['url']
+    except Exception as e:
+        logger.error(f"Ошибка генерации изображения: {e}")
+        return None
 
-# Анимация мышления для админ-режима
+# Поиск в Google
+async def google_search(query):
+    url = "https://www.googleapis.com/customsearch/v1"
+    params = {
+        "key": GOOGLE_API_KEY,
+        "cx": GOOGLE_CSE_ID,
+        "q": query,
+        "num": 5
+    }
+    
+    try:
+        response = requests.get(url, params=params, timeout=15)
+        response.raise_for_status()
+        results = response.json().get('items', [])
+        
+        formatted_results = []
+        for item in results:
+            formatted_results.append({
+                "title": item.get('title'),
+                "link": item.get('link'),
+                "snippet": item.get('snippet')
+            })
+        
+        return formatted_results
+    except Exception as e:
+        logger.error(f"Ошибка поиска Google: {e}")
+        return []
+
+# Форматирование текста как цитаты
+def format_as_quote(text):
+    wrapped_text = textwrap.fill(text, width=60)
+    lines = wrapped_text.split('\n')
+    quoted_lines = [f"▌ {line}" for line in lines]
+    return '\n'.join(quoted_lines)
+
+# Анимация мышления
 async def show_thinking_animation(update, context, thinking_msg):
-    if 'admin_mode' in context.user_data and context.user_data['admin_mode']:
-        for i in range(5):
-            if not context.user_data.get('processing', True):
-                break
-            await asyncio.sleep(1.5)
+    chat_id = update.effective_chat.id
+    for i in range(len(THINKING_ANIMATION)):
+        if not context.user_data.get('processing', True):
+            break
+        try:
             await context.bot.edit_message_text(
-                chat_id=update.effective_chat.id,
+                chat_id=chat_id,
                 message_id=thinking_msg.message_id,
-                text=THINKING_ANIMATION[i % len(THINKING_ANIMATION)]
+                text=THINKING_ANIMATION[i]
             )
+        except:
+            pass
+        await asyncio.sleep(2)
 
 # Обработка входящих сообщений
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    user_message = update.message.text.strip()
     
-    # Отправляем индикатор "Думаю..."
+    # Обработка голосовых сообщений
+    if update.message.voice:
+        # Отправляем индикатор
+        thinking_msg = await update.message.reply_text("🔊 Распознаю голос...")
+        
+        # Получаем файл голосового сообщения
+        voice_file = await update.message.voice.get_file()
+        
+        # Распознаем речь
+        recognized_text = await recognize_voice(voice_file)
+        
+        # Удаляем индикатор
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=thinking_msg.message_id)
+        except:
+            pass
+        
+        if recognized_text:
+            # Обновляем сообщение на распознанный текст
+            await update.message.reply_text(
+                f"🔊 Распознанный текст:\n{format_as_quote(recognized_text)}",
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
+            
+            # Обрабатываем распознанный текст как обычное сообщение
+            update.message.text = recognized_text
+            return await handle_message(update, context)
+        else:
+            await update.message.reply_text("❌ Не удалось распознать речь. Попробуйте еще раз.")
+            return
+    
+    # Обработка изображений
+    if update.message.photo and context.user_data.get('model') == "gemini-2.5-pro":
+        # Отправляем индикатор
+        thinking_msg = await update.message.reply_text("🖼️ Анализирую изображение...")
+        context.user_data['processing'] = True
+        asyncio.create_task(show_thinking_animation(update, context, thinking_msg))
+        
+        # Получаем фото
+        photo_file = await update.message.photo[-1].get_file()
+        photo_data = await photo_file.download_as_bytearray()
+        caption = update.message.caption or ""
+        
+        try:
+            # Формируем запрос
+            image_parts = [{
+                "mime_type": "image/jpeg",
+                "data": base64.b64encode(photo_data).decode('utf-8')
+            }]
+            
+            prompt_parts = [
+                "Дай детальное описание изображения на русском языке.",
+                image_parts[0],
+            ]
+            
+            if caption:
+                prompt_parts.append(f"Запрос пользователя: {caption}")
+            
+            # Отправляем запрос к Gemini
+            response = gemini_vision_model.generate_content(prompt_parts)
+            
+            # Форматируем ответ как цитату
+            analysis_result = format_as_quote(response.text)
+            
+            if caption:
+                analysis_result += f"\n\n🔍 *Запрос:* {caption}"
+            
+            # Отправляем результат
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=analysis_result,
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
+            
+        except Exception as e:
+            logger.error(f"Ошибка анализа изображения: {e}")
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="⚠️ Не удалось проанализировать изображение."
+            )
+        
+        # Удаляем индикатор
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=thinking_msg.message_id)
+        except:
+            pass
+        
+        context.user_data['processing'] = False
+        return
+    
+    # Для текстовых сообщений
+    user_message = update.message.text.strip() if update.message.text else ""
+    
+    # Пропускаем кнопки без обработки ИИ
+    button_commands = [
+        "✍️ Начать", "👑 Админ", "🧩 Тех.поддержка", 
+        "🧠 Модели", "🔙 Назад", "🔓 Выйти из админа",
+        "🔄 Сменить промпт", "🎨 Создать изображение", 
+        "🔍 Поиск в Google", "🔙 Назад в админ"
+    ]
+    
+    if user_message in button_commands:
+        # Обработка кнопок без анимации
+        if user_message == "✍️ Начать":
+            await start(update, context)
+            return
+        
+        elif user_message == "👑 Админ":
+            await update.message.reply_text(
+                "🔒 Введите пароль для доступа к админ-режиму:",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            return WAITING_PASSWORD
+        
+        elif user_message == "🧩 Тех.поддержка":
+            await update.message.reply_text(
+                "🛠️ Свяжитесь с техподдержкой:\nhttps://t.me/Aubeig",
+                reply_markup=main_keyboard
+            )
+            return
+        
+        elif user_message == "🧠 Модели":
+            await update.message.reply_text(
+                "🧠 *Выберите модель:*\n\n"
+                "• Мини-Сырок Lite — быстрая и легкая\n"
+                "• Мини-Сырок V1 — баланс скорости и качества\n"
+                "• Мини-Сырок Max — максимальная мощность (Gemini 2.5 Pro)",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=model_keyboard
+            )
+            return
+        
+        elif user_message in MODEL_OPTIONS:
+            model_id = MODEL_OPTIONS[user_message]
+            context.user_data['model'] = model_id
+            
+            model_info = {
+                "Мини-Сырок Lite": "🚀 *Lite версия активирована!*",
+                "Мини-Сырок V1": "⚡ *V1 версия активирована!*",
+                "Мини-Сырок Max": "💫 *Max версия активирована!*"
+            }
+            
+            await update.message.reply_text(
+                f"✅ {model_info[user_message]}\n"
+                f"Теперь я работаю на модели `{model_id}`",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=main_keyboard
+            )
+            return
+        
+        elif user_message == "🔙 Назад":
+            await update.message.reply_text(
+                "↩️ Возвращаемся в главное меню",
+                reply_markup=main_keyboard
+            )
+            return
+        
+        elif user_message == "🔍 Поиск в Google":
+            await update.message.reply_text(
+                "🔍 Введите запрос для поиска в Google:",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            context.user_data['waiting_for_search'] = True
+            return
+        
+        # Обработка админ-кнопок
+        if context.user_data.get('admin_mode'):
+            if user_message == "🔓 Выйти из админа":
+                await exit_admin(update, context)
+                return
+            
+            elif user_message == "🔄 Сменить промпт":
+                await update.message.reply_text(
+                    "📝 Выберите тип промпта:",
+                    reply_markup=prompt_keyboard
+                )
+                return SELECTING_PROMPT
+            
+            elif user_message == "🎨 Создать изображение":
+                await update.message.reply_text(
+                    "🎨 Введите описание для генерации изображения:",
+                    reply_markup=ReplyKeyboardRemove()
+                )
+                context.user_data['waiting_for_image'] = True
+                return
+    
+    # Обработка поиска в Google
+    if context.user_data.get('waiting_for_search'):
+        # Отправляем индикатор
+        thinking_msg = await update.message.reply_text("🔍 Ищу в Google...")
+        
+        # Выполняем поиск
+        search_results = await google_search(user_message)
+        
+        # Форматируем результаты
+        result_text = "🔍 *Результаты поиска:*\n\n"
+        for i, result in enumerate(search_results[:3], 1):
+            result_text += f"{i}. [{result['title']}]({result['link']})\n"
+            result_text += f"   {result['snippet'][:100]}...\n\n"
+        
+        # Отправляем результаты
+        await context.bot.delete_message(chat_id=chat_id, message_id=thinking_msg.message_id)
+        await update.message.reply_text(
+            result_text,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            disable_web_page_preview=False,
+            reply_markup=main_keyboard
+        )
+        
+        # Сбрасываем флаг
+        context.user_data['waiting_for_search'] = False
+        return
+    
+    # Обработка генерации изображения
+    if context.user_data.get('waiting_for_image'):
+        # Отправляем индикатор
+        thinking_msg = await update.message.reply_text("🎨 Генерирую изображение...")
+        
+        # Генерируем изображение
+        image_url = await generate_image(user_message)
+        
+        if image_url:
+            # Скачиваем изображение
+            response = requests.get(image_url)
+            img = Image.open(BytesIO(response.content))
+            
+            # Сохраняем в буфер
+            img_buffer = BytesIO()
+            img.save(img_buffer, format='PNG')
+            img_buffer.seek(0)
+            
+            # Отправляем изображение
+            await context.bot.delete_message(chat_id=chat_id, message_id=thinking_msg.message_id)
+            await update.message.reply_photo(
+                photo=InputFile(img_buffer, filename='generated_image.png'),
+                caption=f"🎨 Сгенерировано по запросу: {user_message}",
+                reply_markup=admin_keyboard
+            )
+        else:
+            await update.message.reply_text("❌ Не удалось сгенерировать изображение.")
+        
+        # Сбрасываем флаг
+        context.user_data['waiting_for_image'] = False
+        return
+    
+    # Если это не кнопка, запускаем обработку ИИ с анимацией
     thinking_msg = await update.message.reply_text(THINKING_MESSAGE)
-    
-    # Запускаем анимацию мышления для админ-режима
     context.user_data['processing'] = True
     asyncio.create_task(show_thinking_animation(update, context, thinking_msg))
     
-    # Обработка кнопок
-    if user_message == "✍️ Начать":
-        await context.bot.delete_message(
-            chat_id=chat_id,
-            message_id=thinking_msg.message_id
-        )
-        await start(update, context)
-        context.user_data['processing'] = False
-        return
-    
-    elif user_message == "👑 Админ":
-        await context.bot.delete_message(
-            chat_id=chat_id,
-            message_id=thinking_msg.message_id
-        )
-        await update.message.reply_text(
-            "🔒 Введите пароль для доступа к админ-режиму:",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        context.user_data['processing'] = False
-        return WAITING_PASSWORD
-    
-    elif user_message == "🧩 Тех.поддержка":
-        await context.bot.delete_message(
-            chat_id=chat_id,
-            message_id=thinking_msg.message_id
-        )
-        await update.message.reply_text(
-            "🛠️ Свяжитесь с техподдержкой:\nhttps://t.me/Aubeig",
-            reply_markup=main_keyboard
-        )
-        context.user_data['processing'] = False
-        return
-    
-    elif user_message == "🧠 Модели":
-        await context.bot.delete_message(
-            chat_id=chat_id,
-            message_id=thinking_msg.message_id
-        )
-        await update.message.reply_text(
-            "🧠 *Выберите модель:*\n\n"
-            "• `Мини-Сырок Lite` — быстрая и легкая\n"
-            "• `Мини-Сырок V1` — баланс скорости и качества\n"
-            "• `Мини-Сырок Max` — максимальная мощность\n",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=model_keyboard
-        )
-        context.user_data['processing'] = False
-        return
-    
-    elif user_message in MODEL_OPTIONS:
-        model_id = MODEL_OPTIONS[user_message]
-        context.user_data['model'] = model_id
-        
-        await context.bot.delete_message(
-            chat_id=chat_id,
-            message_id=thinking_msg.message_id
-        )
-        
-        # Красивое оформление сообщения
-        model_info = {
-            "Мини-Сырок Lite": "🚀 *Lite версия активирована!*\nБыстрые ответы для повседневных задач",
-            "Мини-Сырок V1": "⚡ *V1 версия активирована!*\nИдеальный баланс скорости и интеллекта",
-            "Мини-Сырок Max": "💫 *Max версия активирована!*\nМаксимальная мощность Мини-Сырка"
-        }
-        
-        await update.message.reply_text(
-            f"✅ {model_info[user_message]}\n\n"
-            f"_Теперь я работаю на модели_ `{model_id}`",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=main_keyboard
-        )
-        context.user_data['processing'] = False
-        return
-    
-    elif user_message == "🔙 Назад":
-        await context.bot.delete_message(
-            chat_id=chat_id,
-            message_id=thinking_msg.message_id
-        )
-        await update.message.reply_text(
-            "↩️ Возвращаемся в главное меню",
-            reply_markup=main_keyboard
-        )
-        context.user_data['processing'] = False
-        return
-    
-    # Обработка админ-кнопок
-    if context.user_data.get('admin_mode'):
-        if user_message == "🔓 Выйти из админа":
-            await context.bot.delete_message(
-                chat_id=chat_id,
-                message_id=thinking_msg.message_id
-            )
-            await exit_admin(update, context)
-            context.user_data['processing'] = False
-            return
-        
-        elif user_message == "🔄 Сменить промпт":
-            await context.bot.delete_message(
-                chat_id=chat_id,
-                message_id=thinking_msg.message_id
-            )
-            await update.message.reply_text(
-                "📝 Выберите тип промпта:",
-                reply_markup=prompt_keyboard
-            )
-            context.user_data['processing'] = False
-            return SELECTING_PROMPT
-        
-        elif user_message == "📊 Статистика":
-            await context.bot.delete_message(
-                chat_id=chat_id,
-                message_id=thinking_msg.message_id
-            )
-            await update.message.reply_text(
-                "📊 Статистика:\n"
-                "• Пользователей: 100\n"
-                "• Сообщений: 1500\n"
-                "• Админ-режим: активен",
-                reply_markup=admin_keyboard
-            )
-            context.user_data['processing'] = False
-            return
-        
-        elif user_message == "🔙 Назад в админ":
-            await context.bot.delete_message(
-                chat_id=chat_id,
-                message_id=thinking_msg.message_id
-            )
-            await update.message.reply_text(
-                "↩️ Возвращаемся в админ-меню",
-                reply_markup=admin_keyboard
-            )
-            context.user_data['processing'] = False
-            return
+    # Проверка на запрос карточки
+    if any(word in user_message.lower() for word in ["карточк", "карты", "карту", "флеш-карт"]) and context.user_data.get('model') == "gemini-2.5-pro":
+        user_message += "\n\nСоздай структурированную карточку в формате для Telegram. Используй эмодзи для оформления."
     
     # Статус "печатает"
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
@@ -696,7 +741,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Применяем выбранный тип промпта
         prompt_type = context.user_data.get('prompt_type', 'system_prompt')
         if prompt_type == 'romantic_prompt':
-            current_system_prompt = romantic_prompt
+            current_system_prompt = admin_system_prompt  # Романтический это админский
         elif prompt_type == 'tech_prompt':
             current_system_prompt = tech_prompt
         elif prompt_type == 'creative_prompt':
@@ -735,14 +780,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Используем выбранную модель или модель по умолчанию
     current_model = context.user_data.get('model', DEFAULT_MODEL)
+    debug_info = ""
     
     try:
         # Определяем, какую модель использовать
         if current_model == "gemini-2.5-pro":
-            # Для Gemini берем только последние 10 сообщений (кроме системного)
+            # Для Gemini берем только последние 10 сообщений
             gemini_history = [chat_history[0]]  # системный промпт
             gemini_history += chat_history[-10:]  # последние 10 сообщений
-            bot_response = await send_gemini_request(gemini_history)
+            bot_response, debug_info = await send_gemini_request(gemini_history)
         else:
             # Используем OpenRouter API
             payload = {
@@ -752,6 +798,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             }
             data = await send_api_request(payload, headers)
             bot_response = data["choices"][0]["message"]["content"]
+            debug_info = json.dumps(payload, indent=2, ensure_ascii=False)
         
         # Проверка на пустой ответ
         if not bot_response or not bot_response.strip():
@@ -763,17 +810,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.add_message(chat_id, "assistant", bot_response)
 
         # Удаляем индикатор "Думаю..." перед отправкой ответа
-        await context.bot.delete_message(
-            chat_id=chat_id,
-            message_id=thinking_msg.message_id
-        )
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=thinking_msg.message_id)
+        except:
+            pass
+        
+        # Форматируем ответ как цитату
+        formatted_response = format_as_quote(bot_response)
         
         # Отправляем ответ пользователю
-        await send_response(update, context, bot_response, current_model)
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=formatted_response,
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+        
+        # Сохраняем отладочную информацию
+        context.user_data['last_debug_info'] = {
+            "prompt": chat_history,
+            "response": bot_response,
+            "model": current_model,
+            "debug": debug_info
+        }
 
     except Exception as e:
         # Редактируем индикатор в сообщение об ошибке
-        await thinking_msg.edit_text(f"⚠️ Ошибка: {str(e)}")
+        try:
+            await thinking_msg.edit_text(f"⚠️ Ошибка: {str(e)}")
+        except:
+            await update.message.reply_text(f"⚠️ Ошибка: {str(e)}")
         logger.error(f"Ошибка: {e}", exc_info=True)
     finally:
         context.user_data['processing'] = False
@@ -820,11 +885,11 @@ async def select_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Обновляем системный промпт
         if prompt_type == 'system_prompt':
+            db.update_system_prompt(chat_id, system_prompt)
+            prompt_content = system_prompt
+        elif prompt_type == 'romantic_prompt':
             db.update_system_prompt(chat_id, admin_system_prompt)
             prompt_content = admin_system_prompt
-        elif prompt_type == 'romantic_prompt':
-            db.update_system_prompt(chat_id, romantic_prompt)
-            prompt_content = romantic_prompt
         elif prompt_type == 'tech_prompt':
             db.update_system_prompt(chat_id, tech_prompt)
             prompt_content = tech_prompt
@@ -833,8 +898,7 @@ async def select_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
             prompt_content = creative_prompt
         
         await update.message.reply_text(
-            f"✅ Промпт успешно изменен на: {user_input}\n"
-            f"Первые 200 символов:\n{prompt_content[:200]}...",
+            f"✅ Промпт успешно изменен на: {user_input}",
             reply_markup=admin_keyboard
         )
         return ConversationHandler.END
@@ -869,11 +933,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     model_name = next((k for k, v in MODEL_OPTIONS.items() if v == current_model), current_model)
     
     welcome_text = (
-        f"┏━━━━━━━✦❘༻༺❘✦━━━━━━━━┓\n"
-        f"*Привет\\!* ✨\n"
+        f"*Привет!* ✨\n"
         f"Чем сегодня займёмся? Помощь, творчество или просто поболтаем? 😊\n\n"
-        f"🔧 _Текущая модель: {model_name}_\n"
-        f"┗━━━━━━━✦❘༻༺❘✦━━━━━━━━┛"
+        f"🔧 Текущая модель: {model_name}"
     )
     
     await update.message.reply_text(
@@ -908,6 +970,36 @@ async def change_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return SELECTING_PROMPT
 
+# Команда для получения отладочной информации
+async def debug_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    debug_data = context.user_data.get('last_debug_info', {})
+    
+    if not debug_data:
+        await update.message.reply_text("ℹ️ Нет отладочной информации о последнем запросе.")
+        return
+    
+    # Форматируем информацию
+    debug_text = "🔧 *Отладочная информация:*\n\n"
+    debug_text += f"*Модель:* `{debug_data.get('model', 'N/A')}`\n"
+    
+    # Добавляем историю промптов
+    debug_text += "\n*История запросов:*\n"
+    for msg in debug_data.get('prompt', []):
+        role = "👤 Пользователь" if msg['role'] == 'user' else "🤖 Ассистент"
+        content = msg['content'][:100] + "..." if len(msg['content']) > 100 else msg['content']
+        debug_text += f"{role}: {content}\n"
+    
+    # Добавляем ответ
+    debug_text += "\n*Ответ ИИ:*\n"
+    debug_text += f"{debug_data.get('response', 'N/A')[:300]}..."
+    
+    # Отправляем информацию
+    await update.message.reply_text(
+        debug_text,
+        parse_mode=ParseMode.MARKDOWN_V2
+    )
+
 # Главная функция
 def main():
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
@@ -934,7 +1026,12 @@ def main():
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("exit_admin", exit_admin))
+    app.add_handler(CommandHandler("debug", debug_info))
     app.add_handler(conv_handler)
+    
+    # Обработчики для разных типов контента
+    app.add_handler(MessageHandler(filters.VOICE, handle_message))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     logger.info("Бот запущен...")
