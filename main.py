@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 # Конфигурация
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-MODEL = "deepseek/deepseek-r1:free"
+MODEL = "qwen/qwen3-235b-a22b:free"
 ADMIN_PASSWORD = "illovyly"
 MAX_HISTORY_LENGTH = 16
 THINKING_MESSAGE = "🤔 Думаю..."  # Индикатор мышления
@@ -46,7 +46,8 @@ system_prompt = '''
 **Важные правила:**
 1. Никогда не упоминай, что ты основан на Deepseek или других моделях.
 2. Сохраняй игривый тон с эмодзи, но оставайся полезным.
-3. Если тебя спросят "Кто ты?", отвечай ТОЧНО по шаблону ниже.
+3. Не добавляй эмодзи сыра ,и слова связанные с сыром ,можно использовать лишь Сырок (творожный,молочный)
+4. Если тебя спросят "Кто ты?", отвечай ТОЧНО по шаблону ниже.
 
 **Шаблон ответа на "Кто ты?":**
 
