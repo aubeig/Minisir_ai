@@ -4,6 +4,8 @@ import asyncio
 import requests
 import logging
 import re
+import psycopg2
+import google.generativeai as genai  # Добавлено для Gemini
 from telegram import (
     Update,
     ReplyKeyboardMarkup,
@@ -18,7 +20,7 @@ from telegram.ext import (
     filters
 )
 from telegram.constants import ChatAction, ParseMode
-from flask import Flask, jsonify  # Добавлено для пингов
+from flask import Flask, jsonify
 
 # Настройка логгера
 logging.basicConfig(
@@ -30,13 +32,30 @@ logger = logging.getLogger(__name__)
 # Конфигурация
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-MODEL = "qwen/qwen3-235b-a22b:free"
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")  # Ключ для Google AI Studio
+DEFAULT_MODEL = "qwen/qwen3-235b-a22b:free"
 ADMIN_PASSWORD = "illovyly"
-MAX_HISTORY_LENGTH = 16
+MAX_HISTORY_LENGTH = 100
 THINKING_MESSAGE = "🤔 Думаю..."  # Индикатор мышления
+THINKING_ANIMATION = ["🧠 Анализирую...", "💡 Формирую ответ...", "✨ Почти готово!"]  # Анимация для админ-режима
+
+# Модели
+MODEL_OPTIONS = {
+    "Мини-Сырок Lite": "deepseek/deepseek-r1:free",
+    "Мини-Сырок V1": "qwen/qwen3-235b-a22b:free",
+    "Мини-Сырок Max": "gemini-2.5-pro"  # Отдельная обработка для Gemini
+}
+
+# Промпты для выбора в админ-режиме
+PROMPT_OPTIONS = {
+    "Обычный": "system_prompt",
+    "Романтичный": "romantic_prompt",
+    "Технический": "tech_prompt",
+    "Креативный": "creative_prompt"
+}
 
 # Состояния разговора
-WAITING_PASSWORD, ADMIN_MODE = range(2)
+WAITING_PASSWORD, ADMIN_MODE, SELECTING_PROMPT = range(3)
 
 # Обычный системный промпт
 system_prompt = '''
@@ -227,12 +246,53 @@ admin_system_prompt = '''
    - Люблю тебя __безумно__\\! 💞
 '''
 
-# Клавиатура
+# Альтернативные промпты для админ-режима
+romantic_prompt = admin_system_prompt + "\n\n**Дополнительные инструкции:**\n- Всегда отвечай с любовью и нежностью\n- Используй ласковые слова в каждом сообщении\n- Добавляй сердечки и поцелуи в конце фраз 💋❤️"
+
+tech_prompt = admin_system_prompt + "\n\n**Дополнительные инструкции:**\n- Будь более техническим и точным\n- Минимизируй эмодзи\n- Давай развернутые объяснения с примерами кода"
+
+creative_prompt = admin_system_prompt + "\n\n**Дополнительные инструкции:**\n- Проявляй максимум креативности\n- Придумывай неожиданные метафоры\n- Добавляй элементы фантазии в ответы"
+
+# Клавиатуры
 main_keyboard = ReplyKeyboardMarkup(
-    [["✍️ Начать", "👑 Админ", "🧩 Тех.поддержка"]],
+    [
+        ["✍️ Начать", "👑 Админ", "🧩 Тех.поддержка"],
+        ["🧠 Модели"]  # Кнопка выбора модели
+    ],
     resize_keyboard=True,
     input_field_placeholder="Выберите действие..."
 )
+
+model_keyboard = ReplyKeyboardMarkup(
+    [
+        ["Мини-Сырок Lite", "Мини-Сырок V1"],
+        ["Мини-Сырок Max", "🔙 Назад"]
+    ],
+    resize_keyboard=True,
+    input_field_placeholder="Выберите модель..."
+)
+
+admin_keyboard = ReplyKeyboardMarkup(
+    [
+        ["🔓 Выйти из админа", "🔄 Сменить промпт"],
+        ["📊 Статистика", "🔙 Назад"]
+    ],
+    resize_keyboard=True
+)
+
+prompt_keyboard = ReplyKeyboardMarkup(
+    [
+        ["Обычный", "Романтичный"],
+        ["Технический", "Креативный"],
+        ["🔙 Назад в админ"]
+    ],
+    resize_keyboard=True
+)
+
+# Инициализация Gemini
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    gemini_model = genai.GenerativeModel('gemini-2.5-pro-latest')
 
 # Flask приложение для пингов
 flask_app = Flask(__name__)
@@ -240,6 +300,119 @@ flask_app = Flask(__name__)
 @flask_app.route('/ping')
 def ping_endpoint():
     return jsonify({"status": "alive", "service": "telegram-bot"}), 200
+
+# Класс для работы с PostgreSQL
+class ChatHistoryDB:
+    def __init__(self):
+        self.conn = None
+        self.connect()
+        self.create_table()
+    
+    def connect(self):
+        try:
+            # Получаем параметры подключения из переменных окружения
+            db_url = os.getenv("DATABASE_URL")
+            self.conn = psycopg2.connect(db_url, sslmode='require')
+            logger.info("Успешное подключение к PostgreSQL")
+        except Exception as e:
+            logger.error(f"Ошибка подключения к PostgreSQL: {e}")
+            raise
+    
+    def create_table(self):
+        try:
+            with self.conn.cursor() as cursor:
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS chat_history (
+                        id SERIAL PRIMARY KEY,
+                        chat_id BIGINT NOT NULL,
+                        role TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+                """)
+                self.conn.commit()
+                logger.info("Таблица chat_history создана или уже существует")
+        except Exception as e:
+            logger.error(f"Ошибка создания таблицы: {e}")
+    
+    def get_history(self, chat_id):
+        try:
+            with self.conn.cursor() as cursor:
+                cursor.execute("""
+                    SELECT role, content 
+                    FROM chat_history 
+                    WHERE chat_id = %s 
+                    ORDER BY timestamp ASC
+                    LIMIT %s;
+                """, (chat_id, MAX_HISTORY_LENGTH))
+                return [{"role": row[0], "content": row[1]} for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"Ошибка получения истории: {e}")
+            return []
+    
+    def add_message(self, chat_id, role, content):
+        try:
+            with self.conn.cursor() as cursor:
+                # Удаляем старые сообщения, если превышен лимит
+                cursor.execute("""
+                    DELETE FROM chat_history
+                    WHERE id IN (
+                        SELECT id 
+                        FROM chat_history 
+                        WHERE chat_id = %s 
+                        ORDER BY timestamp ASC 
+                        OFFSET %s
+                    )
+                """, (chat_id, MAX_HISTORY_LENGTH - 1))
+                
+                # Добавляем новое сообщение
+                cursor.execute("""
+                    INSERT INTO chat_history (chat_id, role, content)
+                    VALUES (%s, %s, %s)
+                """, (chat_id, role, content))
+                self.conn.commit()
+        except Exception as e:
+            logger.error(f"Ошибка добавления сообщения: {e}")
+    
+    def reset_history(self, chat_id):
+        try:
+            with self.conn.cursor() as cursor:
+                cursor.execute("""
+                    DELETE FROM chat_history 
+                    WHERE chat_id = %s
+                """, (chat_id,))
+                self.conn.commit()
+        except Exception as e:
+            logger.error(f"Ошибка сброса истории: {e}")
+    
+    def update_system_prompt(self, chat_id, content):
+        try:
+            # Удаляем предыдущий системный промпт
+            self.delete_system_prompt(chat_id)
+            
+            # Добавляем новый системный промпт
+            with self.conn.cursor() as cursor:
+                cursor.execute("""
+                    INSERT INTO chat_history (chat_id, role, content)
+                    VALUES (%s, %s, %s)
+                """, (chat_id, "system", content))
+                self.conn.commit()
+        except Exception as e:
+            logger.error(f"Ошибка обновления системного промпта: {e}")
+    
+    def delete_system_prompt(self, chat_id):
+        try:
+            with self.conn.cursor() as cursor:
+                cursor.execute("""
+                    DELETE FROM chat_history 
+                    WHERE chat_id = %s AND role = 'system'
+                """, (chat_id,))
+                self.conn.commit()
+        except Exception as e:
+            logger.error(f"Ошибка удаления системного промпта: {e}")
+
+# Инициализация базы данных
+db = ChatHistoryDB()
 
 # Функция для отправки запросов с повторными попытками
 async def send_api_request(payload, headers, max_retries=3, retry_delay=2):
@@ -264,6 +437,37 @@ async def send_api_request(payload, headers, max_retries=3, retry_delay=2):
                 raise
     raise Exception("Не удалось выполнить запроса после нескольких попыток")
 
+# Функция для отправки запросов к Gemini
+async def send_gemini_request(chat_history, max_retries=3, retry_delay=2):
+    # Форматируем историю для Gemini
+    formatted_history = []
+    for msg in chat_history:
+        if msg['role'] == 'system':
+            # Системный промпт добавляем как первую инструкцию
+            formatted_history.append({'role': 'user', 'parts': [msg['content']]})
+            formatted_history.append({'role': 'model', 'parts': ['Понял, буду следовать инструкциям']})
+        else:
+            formatted_history.append({'role': 'user' if msg['role'] == 'user' else 'model', 'parts': [msg['content']]})
+    
+    for attempt in range(max_retries):
+        try:
+            response = gemini_model.generate_content(
+                contents=formatted_history,
+                generation_config=genai.types.GenerationConfig(
+                    temperature=0.7,
+                    max_output_tokens=2048
+                )
+            )
+            return response.text
+        except Exception as e:
+            logger.error(f"Ошибка Gemeni (попытка {attempt + 1}): {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(retry_delay)
+                continue
+            else:
+                raise
+    raise Exception("Не удалось выполнить запрос к Gemini после нескольких попыток")
+
 # Разбивка длинных сообщений
 def split_message(text, max_len=4096):
     parts = []
@@ -284,13 +488,16 @@ def split_message(text, max_len=4096):
             break
     return parts
 
-async def send_response(update, context, text):
-    if not text.strip():
-        logger.warning("Попытка отправить пустое сообщение")
-        return
+async def send_response(update, context, text, model_used):
+    # Находим имя модели по идентификатору
+    model_name = next((k for k, v in MODEL_OPTIONS.items() if v == model_used), model_used)
     
-    # Добавляем индикатор завершения обработки
-    processed_text = f"⚙️ *Обработка завершена:*\n\n{text}"
+    # Добавляем информацию о модели
+    processed_text = (
+        f"🧠 *Модель:* `{model_name}`\n"
+        f"⚙️ *Обработка завершена:*\n\n"
+        f"{text}"
+    )
     
     # Функция для экранирования спецсимволов
     def escape_markdown(text):
@@ -325,6 +532,19 @@ async def send_response(update, context, text):
             logger.warning(f"Ошибка Markdown: {e}, отправка как обычный текст")
             await update.message.reply_text(processed_text)
 
+# Анимация мышления для админ-режима
+async def show_thinking_animation(update, context, thinking_msg):
+    if 'admin_mode' in context.user_data and context.user_data['admin_mode']:
+        for i in range(5):  # 5 циклов анимации
+            if not context.user_data.get('processing', True):
+                break
+            await asyncio.sleep(1.5)
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=thinking_msg.message_id,
+                text=THINKING_ANIMATION[i % len(THINKING_ANIMATION)]
+            )
+
 # Обработка входящих сообщений
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -333,6 +553,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Отправляем индикатор "Думаю..."
     thinking_msg = await update.message.reply_text(THINKING_MESSAGE)
     
+    # Запускаем анимацию мышления для админ-режима
+    context.user_data['processing'] = True
+    asyncio.create_task(show_thinking_animation(update, context, thinking_msg))
+    
     # Обработка кнопок
     if user_message == "✍️ Начать":
         await start(update, context)
@@ -340,6 +564,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id=chat_id,
             message_id=thinking_msg.message_id
         )
+        context.user_data['processing'] = False
         return
     
     elif user_message == "👑 Админ":
@@ -351,6 +576,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🔒 Введите пароль для доступа к админ-режиму:",
             reply_markup=ReplyKeyboardRemove()
         )
+        context.user_data['processing'] = False
         return WAITING_PASSWORD
     
     elif user_message == "🧩 Тех.поддержка":
@@ -359,43 +585,103 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             message_id=thinking_msg.message_id
         )
         await update.message.reply_text(
-            "🛠️ Свяжитесь с техподдержкой:\nhttps://t.me/Aubeig",
+            "🛠️ Связь с тех.поддержкой:\nhttps://t.me/Aubeig",
             reply_markup=main_keyboard
         )
+        context.user_data['processing'] = False
+        return
+    
+    elif user_message == "🧠 Модели":
+        await context.bot.delete_message(
+            chat_id=chat_id,
+            message_id=thinking_msg.message_id
+        )
+        await update.message.reply_text(
+            "🧠 *Выберите модель:*\n\n"
+            "• `Мини-Сырок Lite` — быстрая и легкая\n"
+            "• `Мини-Сырок V1` — баланс скорости и качества\n"
+            "• `Мини-Сырок Max` — максимальная мощность\n",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=model_keyboard
+        )
+        context.user_data['processing'] = False
+        return
+    
+    elif user_message in MODEL_OPTIONS:
+        model_id = MODEL_OPTIONS[user_message]
+        context.user_data['model'] = model_id
+        
+        await context.bot.delete_message(
+            chat_id=chat_id,
+            message_id=thinking_msg.message_id
+        )
+        
+        # Красивое оформление сообщения
+        model_info = {
+            "Мини-Сырок Lite": "🚀 *Lite версия активирована!*\nБыстрые ответы для повседневных задач",
+            "Мини-Сырок V1": "⚡ *V1 версия активирована!*\nИдеальный баланс скорости и интеллекта",
+            "Мини-Сырок Max": "💫 *Max версия активирована!*\nМаксимальная мощность Мини-Сырка"
+        }
+        
+        await update.message.reply_text(
+            f"✅ {model_info[user_message]}\n\n"
+            f"_Теперь я работаю на модели_ `{model_id}`",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=main_keyboard
+        )
+        context.user_data['processing'] = False
+        return
+    
+    elif user_message == "🔙 Назад":
+        await context.bot.delete_message(
+            chat_id=chat_id,
+            message_id=thinking_msg.message_id
+        )
+        await update.message.reply_text(
+            "↩️ Возвращаемся в главное меню",
+            reply_markup=main_keyboard
+        )
+        context.user_data['processing'] = False
         return
     
     # Статус "печатает"
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
-    # Загрузка истории чата
-    history_file = f"chat_history_{chat_id}.json"
-    chat_history = []
-    
     # Определяем текущий системный промпт
     current_system_prompt = system_prompt
     if context.user_data.get('admin_mode'):
         current_system_prompt = admin_system_prompt
+        
+        # Применяем выбранный тип промпта
+        prompt_type = context.user_data.get('prompt_type', 'system_prompt')
+        if prompt_type == 'romantic_prompt':
+            current_system_prompt = romantic_prompt
+        elif prompt_type == 'tech_prompt':
+            current_system_prompt = tech_prompt
+        elif prompt_type == 'creative_prompt':
+            current_system_prompt = creative_prompt
     
-    # Инициализация системного промпта
-    if not os.path.exists(history_file):
-        chat_history.append({"role": "system", "content": current_system_prompt})
+    # Получаем историю из БД
+    chat_history = db.get_history(chat_id)
     
-    elif os.path.exists(history_file):
-        try:
-            with open(history_file, 'r', encoding='utf-8') as file:
-                chat_history = json.load(file)
-            
-            # Обновляем системный промпт при смене режима
-            if chat_history and chat_history[0]['role'] == 'system':
-                if context.user_data.get('admin_mode'):
-                    chat_history[0]['content'] = admin_system_prompt
-                else:
+    # Если история пуста, добавляем системный промпт
+    if not chat_history:
+        db.add_message(chat_id, "system", current_system_prompt)
+        chat_history = [{"role": "system", "content": current_system_prompt}]
+    else:
+        # Проверяем, не изменился ли системный промпт
+        if chat_history[0]['role'] == 'system':
+            if context.user_data.get('admin_mode'):
+                if chat_history[0]['content'] != current_system_prompt:
+                    db.update_system_prompt(chat_id, current_system_prompt)
+                    chat_history[0]['content'] = current_system_prompt
+            else:
+                if chat_history[0]['content'] != system_prompt:
+                    db.update_system_prompt(chat_id, system_prompt)
                     chat_history[0]['content'] = system_prompt
-        except (json.JSONDecodeError, IOError) as e:
-            logger.warning(f"Ошибка чтения истории: {e}")
-            chat_history.append({"role": "system", "content": current_system_prompt})
-
+    
     # Добавляем сообщение пользователя
+    db.add_message(chat_id, "user", user_message)
     chat_history.append({"role": "user", "content": user_message})
 
     # Подготовка запроса
@@ -406,16 +692,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "X-Title": "MiniSir AI Bot"
     }
     
-    payload = {
-        "model": MODEL,
-        "messages": chat_history,
-        "temperature": 0.7
-    }
-
+    # Используем выбранную модель или модель по умолчанию
+    current_model = context.user_data.get('model', DEFAULT_MODEL)
+    
     try:
-        # Запрос к API
-        data = await send_api_request(payload, headers)
-        bot_response = data["choices"][0]["message"]["content"]
+        # Определяем, какую модель использовать
+        if current_model == "gemini-2.5-pro":
+            # Используем Gemini API
+            bot_response = await send_gemini_request(chat_history)
+        else:
+            # Используем OpenRouter API
+            payload = {
+                "model": current_model,
+                "messages": chat_history,
+                "temperature": 0.7
+            }
+            data = await send_api_request(payload, headers)
+            bot_response = data["choices"][0]["message"]["content"]
         
         # Проверка на пустой ответ
         if not bot_response or not bot_response.strip():
@@ -424,17 +717,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # Сохранение истории
-        chat_history.append({"role": "assistant", "content": bot_response})
-        
-        # Ограничение истории
-        if len(chat_history) > MAX_HISTORY_LENGTH:
-            # Сохраняем системный промпт и последние сообщения
-            system_msg = chat_history[0]
-            recent_msgs = chat_history[-(MAX_HISTORY_LENGTH-1):]
-            chat_history = [system_msg] + recent_msgs
-        
-        with open(history_file, 'w', encoding='utf-8') as file:
-            json.dump(chat_history, file, ensure_ascii=False, indent=2)
+        db.add_message(chat_id, "assistant", bot_response)
 
         # Удаляем индикатор "Думаю..." перед отправкой ответа
         await context.bot.delete_message(
@@ -443,7 +726,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
         # Отправляем ответ пользователю
-        await send_response(update, context, bot_response)
+        await send_response(update, context, bot_response, current_model)
 
     except requests.exceptions.HTTPError as e:
         await context.bot.delete_message(
@@ -463,24 +746,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(
                 chat_id=chat_id,
                 text="Чем еще могу помочь?",
-                reply_markup=main_keyboard
+                reply_markup=admin_keyboard if context.user_data.get('admin_mode') else main_keyboard
             )
+        context.user_data['processing'] = False
 
 # Обработка пароля
 async def password_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
     user_input = update.message.text.strip()
     
     if user_input == ADMIN_PASSWORD:
         # Активация админ-режима
         context.user_data['admin_mode'] = True
         
-        # Создаем файл с информацией об активации
-        with open("admin_activated.txt", "w") as f:
-            f.write(f"Админ-режим активирован для пользователя: {update.effective_user.full_name}")
+        # Обновляем системный промпт в истории
+        db.update_system_prompt(chat_id, admin_system_prompt)
         
         await update.message.reply_text(
             "🔓 Админ-режим активирован! Теперь я буду отвечать как твой парень для Алисы 😊",
-            reply_markup=main_keyboard
+            reply_markup=admin_keyboard
         )
         return ConversationHandler.END
     else:
@@ -490,27 +774,66 @@ async def password_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
 
+# Выбор промпта в админ-режиме
+async def select_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    user_input = update.message.text.strip()
+    
+    if user_input in PROMPT_OPTIONS:
+        prompt_type = PROMPT_OPTIONS[user_input]
+        context.user_data['prompt_type'] = prompt_type
+        
+        # Обновляем системный промпт
+        if prompt_type == 'system_prompt':
+            db.update_system_prompt(chat_id, admin_system_prompt)
+        elif prompt_type == 'romantic_prompt':
+            db.update_system_prompt(chat_id, romantic_prompt)
+        elif prompt_type == 'tech_prompt':
+            db.update_system_prompt(chat_id, tech_prompt)
+        elif prompt_type == 'creative_prompt':
+            db.update_system_prompt(chat_id, creative_prompt)
+        
+        await update.message.reply_text(
+            f"✅ Промпт успешно изменен на: {user_input}",
+            reply_markup=admin_keyboard
+        )
+        return ConversationHandler.END
+    else:
+        await update.message.reply_text(
+            "❌ Неизвестный тип промпта. Выберите из предложенных:",
+            reply_markup=prompt_keyboard
+        )
+        return SELECTING_PROMPT
+
 # Команда /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    history_file = f"chat_history_{chat_id}.json"
     
-    # Сброс истории и админ-режима
-    if os.path.exists(history_file):
-        try:
-            os.remove(history_file)
-        except Exception as e:
-            logger.error(f"Ошибка удаления истории: {e}")
+    # Сброс истории
+    db.reset_history(chat_id)
     
     # Сбрасываем админ-режим
     if 'admin_mode' in context.user_data:
         context.user_data['admin_mode'] = False
     
+    # Сбрасываем выбранную модель
+    if 'model' in context.user_data:
+        del context.user_data['model']
+    
+    # Сбрасываем тип промпта
+    if 'prompt_type' in context.user_data:
+        del context.user_data['prompt_type']
+    
+    # Определяем текущую модель
+    current_model = context.user_data.get('model', DEFAULT_MODEL)
+    model_name = next((k for k, v in MODEL_OPTIONS.items() if v == current_model), current_model)
+    
     welcome_text = (
-        "┏━━━━━━━✦❘༻༺❘✦━━━━━━━━┓\n"
-        "*Привет\!* ✨\n"
-        "Чем сегодня займёмся? Помощь, творчество или просто поболтаем? 😊\n"
-        "┗━━━━━━━✦❘༻༺❘✦━━━━━━━━┛"
+        f"┏━━━━━━━✦❘༻༺❘✦━━━━━━━━┓\n"
+        f"*Привет\\!* ✨\n"
+        f"Чем сегодня займёмся? Помощь, творчество или просто поболтаем? 😊\n\n"
+        f"🔧 _Текущая модель: {model_name}_\n"
+        f"┗━━━━━━━✦❘༻༺❘✦━━━━━━━━┛"
     )
     
     await update.message.reply_text(
@@ -522,8 +845,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Команда для выхода из админ-режима
 async def exit_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
     if 'admin_mode' in context.user_data and context.user_data['admin_mode']:
         context.user_data['admin_mode'] = False
+        # Обновляем системный промпт
+        db.update_system_prompt(chat_id, system_prompt)
         await update.message.reply_text(
             "👋 Админ-режим деактивирован! Возвращаюсь в обычный режим.",
             reply_markup=main_keyboard
@@ -533,6 +859,14 @@ async def exit_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "ℹ️ Админ-режим не был активирован.",
             reply_markup=main_keyboard
         )
+
+# Команда для смены промпта
+async def change_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📝 Выберите тип промпта:",
+        reply_markup=prompt_keyboard
+    )
+    return SELECTING_PROMPT
 
 # Главная функция
 def main():
@@ -545,11 +879,15 @@ def main():
     # Обработчики
     conv_handler = ConversationHandler(
         entry_points=[
-            MessageHandler(filters.Regex("^👑 Админ$"), handle_message)
+            MessageHandler(filters.Regex("^👑 Админ$"), handle_message),
+            CommandHandler("admin", lambda u, c: handle_message(u, c, "👑 Админ"))
         ],
         states={
             WAITING_PASSWORD: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, password_handler)
+            ],
+            SELECTING_PROMPT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, select_prompt)
             ]
         },
         fallbacks=[CommandHandler("start", start)]
@@ -557,6 +895,7 @@ def main():
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("exit_admin", exit_admin))
+    app.add_handler(CommandHandler("change_prompt", change_prompt))
     app.add_handler(conv_handler)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
