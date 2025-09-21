@@ -1,0 +1,12 @@
+python-telegram-bot==20.6
+httpx==0.25.2
+psycopg2-binary
+google-generativeai
+python-dotenv
+Flask
+# Для медиа и документов
+SpeechRecognition
+pydub
+ffmpeg-python
+PyPDF2
+markdown
